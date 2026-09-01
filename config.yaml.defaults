@@ -58,10 +58,14 @@ services:
                     # production routing: regex for names/coordinates, the
                     # constrained LLM for photometry/redshift/classification.
                     kind: hybrid
-                    # llama.cpp OpenAI-compatible server (MSI agc03:8080 via an
-                    # ssh port-forward, or localhost when co-located).
+                    # llama.cpp OpenAI-compatible server on MSI agc03 (see
+                    # bin/tunnel.sh), or localhost when co-located. Two are up:
+                    #   8080  bartowski/Mistral-7B-Instruct-v0.3-GGUF:Q4_K_M
+                    #   8081  ggml-org/Qwen3.8-27B-GGUF:Q8_0
+                    # llama_model must match what the port serves — the server
+                    # uses it to pick the model, it is not a free-text label.
                     llama_url: http://localhost:8080
-                    llama_model: mistral-7b
+                    llama_model: bartowski/Mistral-7B-Instruct-v0.3-GGUF:Q4_K_M
                     llama_timeout: 300
                     # Trained SN-type classifier (circex classify-train). Null
                     # disables classification from the regex side.
