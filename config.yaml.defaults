@@ -1,0 +1,88 @@
+services:
+    external:
+        circex:
+            repo: https://github.com/skyportal/circex-skyportal-plugin.git
+            rev: main
+            params:
+                listener:
+                    host: 0.0.0.0
+                    port: 7200
+                skyportal:
+                    # SkyPortal instance this service writes to.
+                    base_url: http://localhost:5000/api
+                    api_token: replace_with_token_with_gcn_and_source_write_acls
+                    # Groups new counterpart sources are saved to.
+                    group_ids: []
+                    # SkyPortal instrument_id used when a circular's telescope is
+                    # not in instrument_map. Photometry rows that resolve to
+                    # neither are dropped to a comment (SkyPortal requires one).
+                    default_instrument_id: null
+                    # telescope_canonical -> SkyPortal instrument_id.
+                    instrument_map: {}
+                    timeout: 30
+                writes:
+                    # MASTER SWITCH. false = plan every request and log it, send
+                    # nothing. Flip to true only against an instance you mean to
+                    # write to.
+                    live: false
+                    # Individual write channels, all independent of `live`.
+                    alias: true            # POST /gcn_event/{dateobs}/alias
+                    source: true           # POST /sources  + /photometry
+                    confirm_in_gcn: true   # POST /sources_in_gcn/{dateobs}
+                    comment: true          # POST /gcn_event/{dateobs}/comments
+                    tag: false             # POST /gcn_event/{dateobs}/tags
+                    # Tag applied to an event once an optical counterpart lands.
+                    counterpart_tag: HAS-OPTICAL-COUNTERPART
+                resolver:
+                    # How a circular's event name becomes a SkyPortal dateobs.
+                    # Tried in order; first hit wins.
+                    #   alias      - GET /gcn_event?partialdateobs=<name>
+                    #   designation- decode the date out of "GRB 260604C" and
+                    #                search that UTC day
+                    #   trigger    - the circular's own trigger_time, +/- window
+                    order: [alias, designation, trigger]
+                    # Half-width of the dateobs search window, hours. A GRB
+                    # designation only fixes the UTC day, so a burst just after
+                    # midnight can sit in the neighbouring day's events.
+                    window_hours: 12
+                    # Cone radius (arcsec) for matching an extracted counterpart
+                    # position against sources already on the event.
+                    match_radius_arcsec: 5.0
+                    # Circulars whose event never resolves are parked here and
+                    # retried on the interval below (events are often created in
+                    # SkyPortal after the first circular arrives).
+                    retry_interval_seconds: 900
+                    retry_max_age_hours: 72
+                extractor:
+                    # regex | llama | hybrid. hybrid is Circex's measured
+                    # production routing: regex for names/coordinates, the
+                    # constrained LLM for photometry/redshift/classification.
+                    kind: hybrid
+                    # llama.cpp OpenAI-compatible server (MSI agc03:8080 via an
+                    # ssh port-forward, or localhost when co-located).
+                    llama_url: http://localhost:8080
+                    llama_model: mistral-7b
+                    llama_timeout: 300
+                    # Trained SN-type classifier (circex classify-train). Null
+                    # disables classification from the regex side.
+                    sn_type_model: null
+                    # LLM response cache; survives restarts.
+                    cache_path: data/llm_cache.sqlite
+                consumer:
+                    # Live GCN Kafka stream. Needs the `live` extra and GCN
+                    # credentials (https://gcn.nasa.gov/quickstart).
+                    enabled: false
+                    topic: gcn.circulars
+                    client_id: null
+                    client_secret: null
+                    # Replay a directory of {id}.json circulars instead of Kafka.
+                    # Takes precedence over the stream when set.
+                    replay_dir: null
+                archive:
+                    # Circex archive of raw circulars, used to walk the xref graph
+                    # and to backfill an event. Null = fetch from gcn.nasa.gov.
+                    dir: null
+                auth:
+                    # Bearer token required on incoming requests to this service.
+                    # Null disables auth (dev only).
+                    incoming_bearer_token: null

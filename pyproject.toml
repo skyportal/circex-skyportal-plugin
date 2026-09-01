@@ -1,0 +1,46 @@
+[project]
+name = "circex-skyportal-plugin"
+version = "0.1.0"
+description = "SkyPortal service that binds Circex GCN circular extractions onto GcnEvents"
+authors = [
+  { name = "Michael Coughlin", email = "cough052@umn.edu" }
+]
+license = "MIT"
+readme = "README.md"
+# circex requires >=3.13.
+requires-python = ">=3.13"
+dependencies = [
+  # PyPI circex 0.1.0 predates the hybrid + llama-server extractors this plugin
+  # is built on. Track the repo until the next release.
+  "circex @ git+https://github.com/skyportal/Circex.git@main",
+  "tornado>=6.4",
+  "pyyaml>=6.0",
+  "requests>=2.32",
+  "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+# Live GCN Kafka stream. The replay path and the HTTP listener work without it.
+live = ["gcn-kafka>=0.3"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[tool.compatibility]
+compatible-with = [
+  { name = "skyportal", version = ">=1.4.0" }
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]
