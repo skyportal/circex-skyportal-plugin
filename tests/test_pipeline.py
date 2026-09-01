@@ -153,8 +153,12 @@ def test_photometry_already_in_skyportal_is_not_reposted(cfg, flurry):
         state = pipeline.SessionState()
         for record in replay_dir_records(flurry):
             pipeline.process_circular(
-                record, extractor=extractor, client=client, fetch=dir_fetch(flurry),
-                cfg=cfg, state=state,
+                record,
+                extractor=extractor,
+                client=client,
+                fetch=dir_fetch(flurry),
+                cfg=cfg,
+                state=state,
             )
         return client
 
