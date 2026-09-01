@@ -121,7 +121,25 @@ async def retry_pending(ctx: dict[str, Any]) -> None:
                 PENDING[-1] = (parked_at, record)
 
 
-def _kafka_consumer(ccfg: dict[str, Any]) -> Any:
+def gcn_credentials(ccfg: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Consumer credentials, falling back to SkyPortal's own.
+
+    SkyPortal's notice service already holds GCN credentials, and its stream is
+    the same account. Reading those keeps one copy to rotate.
+    """
+    client_id, client_secret = ccfg.get("client_id"), ccfg.get("client_secret")
+    if client_id and client_secret:
+        return client_id, client_secret
+    try:
+        from baselayer.app.env import load_env
+
+        _, app_cfg = load_env()
+        return app_cfg["gcn.client_id"], app_cfg["gcn.client_secret"]
+    except Exception:
+        return client_id, client_secret
+
+
+def _kafka_consumer(ccfg: dict[str, Any], client_id: str, client_secret: str) -> Any:
     """A stable consumer group, so a restart resumes where it stopped."""
     from gcn_kafka import Consumer
 
@@ -131,8 +149,8 @@ def _kafka_consumer(ccfg: dict[str, Any]) -> Any:
             "auto.offset.reset": ccfg.get("offset_reset") or "latest",
             "enable.auto.commit": False,
         },
-        client_id=ccfg["client_id"],
-        client_secret=ccfg["client_secret"],
+        client_id=client_id,
+        client_secret=client_secret,
         domain=ccfg.get("server") or "gcn.nasa.gov",
     )
     consumer.subscribe([ccfg.get("topic") or "gcn.circulars"])
@@ -151,12 +169,15 @@ async def run_consumer(ctx: dict[str, Any]) -> None:
             await handle_record(record, ctx)
         return
 
-    missing = [k for k in ("client_id", "client_secret", "group_id") if not ccfg.get(k)]
-    if missing:
-        log.warning("consumer enabled but %s not set; not starting", ", ".join(missing))
+    client_id, client_secret = gcn_credentials(ccfg)
+    if not (client_id and client_secret):
+        log.warning("no GCN credentials, here or in gcn.*; consumer not starting")
+        return
+    if not ccfg.get("group_id"):
+        log.warning("consumer.group_id not set; consumer not starting")
         return
 
-    consumer = await loop.run_in_executor(None, _kafka_consumer, ccfg)
+    consumer = await loop.run_in_executor(None, _kafka_consumer, ccfg, client_id, client_secret)
     log.info("subscribed as group %s", ccfg["group_id"])
     while True:
         messages = await loop.run_in_executor(None, consumer.consume, 10, 1.0)

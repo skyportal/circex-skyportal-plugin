@@ -56,6 +56,8 @@ services:
                     enabled: false
                     topic: gcn.circulars
                     server: gcn.nasa.gov
+                    # Unset falls back to SkyPortal's own gcn.client_id /
+                    # gcn.client_secret, so there is one copy to rotate.
                     client_id:
                     client_secret:
                     # Must be stable across restarts and distinct from any other
