@@ -31,10 +31,19 @@ class FakeSkyPortal:
     that writing the alias makes the next lookup resolve by alias.
     """
 
-    def __init__(self, events: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        events: list[dict[str, Any]] | None = None,
+        photometry: dict[str, list[tuple[str, str, float]]] | None = None,
+    ) -> None:
         self.events = [dict(e) for e in (events if events is not None else [EVENT])]
         self.plan: list[dict[str, Any]] = []
         self.enabled = False
+        # obj_id -> points SkyPortal already holds, as prime() would find them.
+        self.photometry = photometry or {}
+
+    def existing_photometry(self, obj_id: str) -> list[tuple[str, str, float]]:
+        return list(self.photometry.get(obj_id, []))
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if path != "/gcn_event":

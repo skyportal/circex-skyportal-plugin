@@ -171,6 +171,7 @@ class SessionState:
     tags: set[str] = field(default_factory=set)  # dateobs
     commented: set[str] = field(default_factory=set)  # dateobs
     sources: set[tuple[str, float | None, float | None]] = field(default_factory=set)
+    primed: set[str] = field(default_factory=set)  # objects seeded from SkyPortal
 
     def is_duplicate(self, point: Any) -> bool:
         mjds = self.photometry.get((point.obj_id, point.filter))
@@ -178,6 +179,18 @@ class SessionState:
 
     def remember(self, point: Any) -> None:
         self.photometry.setdefault((point.obj_id, point.filter), []).append(point.mjd)
+
+    def prime(self, obj_id: str, client: Any) -> None:
+        """Seed this object's dedup set from SkyPortal, once per process.
+
+        In-memory state only knows what this process posted. Priming is what
+        makes a restart idempotent rather than duplicating every light curve.
+        """
+        if obj_id in self.primed:
+            return
+        self.primed.add(obj_id)
+        for oid, filter_name, mjd in client.existing_photometry(obj_id):
+            self.photometry.setdefault((oid, filter_name), []).append(mjd)
 
 
 def _write_source(
@@ -253,6 +266,7 @@ def process_circular(
     result.dateobs, result.matched_by = match.dateobs, match.matched_by
 
     if state is not None:
+        state.prime(actions.source.id, client)
         fresh = []
         for point in actions.photometry:
             if state.is_duplicate(point):

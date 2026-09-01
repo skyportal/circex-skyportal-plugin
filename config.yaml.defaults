@@ -77,8 +77,19 @@ services:
                     # credentials (https://gcn.nasa.gov/quickstart).
                     enabled: false
                     topic: gcn.circulars
+                    server: gcn.nasa.gov
                     client_id: null
                     client_secret: null
+                    # Kafka consumer group. MUST be stable across restarts —
+                    # that is what makes the service resume where it stopped
+                    # instead of replaying or skipping the stream. It must also
+                    # be distinct from any other Circex consumer reading the
+                    # same topic, or the two will split the partitions between
+                    # them and each will see only part of the stream.
+                    group_id: null
+                    # Where a brand-new group starts. `latest` ignores the
+                    # backlog; use `earliest` for a deliberate backfill.
+                    offset_reset: latest
                     # Replay a directory of {id}.json circulars instead of Kafka.
                     # Takes precedence over the stream when set.
                     replay_dir: null

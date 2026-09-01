@@ -70,6 +70,23 @@ class SkyPortalClient:
             log.warning("GET %s failed: %s", path, exc)
             return None
 
+    def existing_photometry(self, obj_id: str) -> list[tuple[str, str, float]]:
+        """(obj_id, filter, mjd) already on a source, for seeding dedup.
+
+        Without this the dedup set is only as old as the process: a restart
+        re-aggregates each event from its circulars and re-posts the whole light
+        curve. Reads are not gated by `live`, so a dry run sees real duplicates too.
+        """
+        data = self.get(f"/sources/{obj_id}/photometry")
+        points = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(points, list):
+            return []
+        return [
+            (obj_id, point["filter"], point["mjd"])
+            for point in points
+            if isinstance(point, dict) and point.get("filter") and point.get("mjd") is not None
+        ]
+
     def _url(self, path: str) -> str:
         return self.base_url.rstrip("/") + "/" + path.lstrip("/")
 

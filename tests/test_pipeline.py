@@ -139,3 +139,34 @@ def test_writes_switched_off_produce_no_requests(cfg, client, flurry):
             state=state,
         )
     assert client.plan == []
+
+
+@requires_extractions
+def test_photometry_already_in_skyportal_is_not_reposted(cfg, flurry):
+    """A restart must not re-post a light curve SkyPortal already holds."""
+    from circex.consume.sources import dir_fetch, replay_dir_records
+
+    from tests.conftest import FakeSkyPortal
+
+    def replay(client):
+        extractor = pipeline.build_extractor(cfg)
+        state = pipeline.SessionState()
+        for record in replay_dir_records(flurry):
+            pipeline.process_circular(
+                record, extractor=extractor, client=client, fetch=dir_fetch(flurry),
+                cfg=cfg, state=state,
+            )
+        return client
+
+    first = replay(FakeSkyPortal())
+    posted = [w["payload"] for w in first.paths("/photometry")]
+    assert posted, "first run posted nothing"
+
+    # Second process, same SkyPortal: everything the first run wrote is now there.
+    already = {}
+    for payload in posted:
+        already.setdefault(payload["obj_id"], []).append(
+            (payload["obj_id"], payload["filter"], payload["mjd"])
+        )
+    second = replay(FakeSkyPortal(photometry=already))
+    assert second.paths("/photometry") == [], "restart re-posted existing photometry"

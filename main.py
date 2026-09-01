@@ -149,6 +149,50 @@ async def retry_pending(ctx: dict[str, Any]) -> None:
                 PENDING[-1] = (parked_at, record)
 
 
+def _consume_kafka(ctx: dict[str, Any]) -> None:
+    """Blocking GCN Kafka loop: handle a circular, then commit its offset.
+
+    Circex's helper leaves the consumer group unset and auto-commits, so a
+    restart neither resumes where it stopped nor replays a circular that was
+    being handled when the process died. Both matter when this owns production,
+    so the consumer is built here: a stable group id to resume from, and a
+    commit only once the circular has actually been written.
+    """
+    from gcn_kafka import Consumer
+
+    ccfg = ctx["cfg"].get("consumer") or {}
+    topic = ccfg.get("topic") or "gcn.circulars"
+    consumer = Consumer(
+        config={
+            "group.id": ccfg["group_id"],
+            "auto.offset.reset": ccfg.get("offset_reset") or "latest",
+            "enable.auto.commit": False,
+        },
+        client_id=ccfg["client_id"],
+        client_secret=ccfg["client_secret"],
+        domain=ccfg.get("server") or "gcn.nasa.gov",
+    )
+    consumer.subscribe([topic])
+    log.info("subscribed to %s as group %s", topic, ccfg["group_id"])
+    while True:
+        for message in consumer.consume(timeout=1):
+            if message.error() or message.value() is None:
+                continue
+            try:
+                record = json.loads(message.value())
+            except json.JSONDecodeError as exc:
+                log.warning("undecodable circular on %s: %s", topic, exc)
+                consumer.commit(message)
+                continue
+            try:
+                handle_record(record, ctx)
+            except Exception:
+                # Leave the offset uncommitted so the circular is retried.
+                log.exception("failed to handle circular %s", record.get("circularId"))
+                continue
+            consumer.commit(message)
+
+
 async def run_consumer(ctx: dict[str, Any]) -> None:
     """Feed the pipeline from the GCN Kafka stream or a replay directory."""
     ccfg = ctx["cfg"].get("consumer") or {}
@@ -159,24 +203,20 @@ async def run_consumer(ctx: dict[str, Any]) -> None:
 
         records = replay_dir_records(Path(replay_dir))
         log.info("replaying circulars from %s", replay_dir)
-    else:
-        from circex.consume.sources import gcn_kafka_records
+        sentinel = object()
+        while True:
+            record = await loop.run_in_executor(_WORK_POOL, lambda: next(records, sentinel))
+            if record is sentinel:
+                log.info("replay finished")
+                return
+            await loop.run_in_executor(_WORK_POOL, functools.partial(handle_record, record, ctx))
+        return
 
-        client_id, secret = ccfg.get("client_id"), ccfg.get("client_secret")
-        if not (client_id and secret):
-            log.warning("consumer enabled but GCN credentials are missing; not starting")
-            return
-        records = gcn_kafka_records(client_id, secret, topic=ccfg.get("topic") or "gcn.circulars")
-        log.info("subscribed to %s", ccfg.get("topic") or "gcn.circulars")
-
-    # The record iterators are blocking, so step them in the pool too.
-    sentinel = object()
-    while True:
-        record = await loop.run_in_executor(_WORK_POOL, lambda: next(records, sentinel))
-        if record is sentinel:
-            log.info("consumer stream ended")
-            return
-        await loop.run_in_executor(_WORK_POOL, functools.partial(handle_record, record, ctx))
+    missing = [k for k in ("client_id", "client_secret", "group_id") if not ccfg.get(k)]
+    if missing:
+        log.warning("consumer enabled but %s not set; not starting", ", ".join(missing))
+        return
+    await loop.run_in_executor(_WORK_POOL, functools.partial(_consume_kafka, ctx))
 
 
 def _check_bearer(handler: tornado.web.RequestHandler, expected: str | None) -> bool:
