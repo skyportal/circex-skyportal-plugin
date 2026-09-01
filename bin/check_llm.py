@@ -120,11 +120,19 @@ def rung_3_extraction(url: str, model: str, circular: Path | None, timeout: floa
         return False
     elapsed = time.perf_counter() - started
     event = extraction.event.event_name if extraction.event else None
-    print(
-        f"  OK    extracted circular {extraction.circular_id} in {elapsed:.1f}s: "
-        f"event={event} photometry={len(extraction.photometry)} "
+    summary = (
+        f"circular {extraction.circular_id} in {elapsed:.1f}s: event={event} "
+        f"photometry={len(extraction.photometry)} "
         f"redshift={extraction.redshift.redshift if extraction.redshift else None}"
     )
+    # LlamaServerExtractor fail-softs: a bad response is logged and yields an
+    # empty extraction rather than raising. An empty result on a circular this
+    # dense means the server did not really answer, so treat it as a failure.
+    if event is None and not extraction.photometry:
+        print(f"  FAIL  extracted nothing from {summary}")
+        print("        The server returned no usable JSON — see the warning above.")
+        return False
+    print(f"  OK    extracted {summary}")
     return True
 
 
