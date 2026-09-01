@@ -75,6 +75,11 @@ services:
                     #            circular, since {} satisfies an empty required.
                     # See circex docs/known_issues.md, Sprint 7.
                     llama_require_fields: false
+                    # Bearer token, for a server reached over the internet
+                    # rather than an ssh tunnel (e.g. babamul.umn.edu/llm).
+                    # A llama-server on localhost needs none. Keep the real
+                    # value out of version control.
+                    llama_api_key: null
                     # Trained SN-type classifier (circex classify-train). Null
                     # disables classification from the regex side.
                     sn_type_model: null

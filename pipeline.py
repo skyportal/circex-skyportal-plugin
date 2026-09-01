@@ -70,6 +70,7 @@ def build_extractor(cfg: dict[str, Any]) -> Any:
         cache=cache,
         timeout=float(ecfg.get("llama_timeout") or 300),
         require_fields=bool(ecfg.get("llama_require_fields", False)),
+        api_key=ecfg.get("llama_api_key") or None,
     )
     if kind == "llama":
         return llm
