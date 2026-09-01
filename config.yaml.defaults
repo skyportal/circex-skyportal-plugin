@@ -4,113 +4,66 @@ services:
             repo: https://github.com/skyportal/circex-skyportal-plugin.git
             rev: main
             params:
-                listener:
-                    host: 0.0.0.0
-                    port: 7200
                 skyportal:
-                    # SkyPortal instance this service writes to.
-                    base_url: http://localhost:5000/api
-                    api_token: replace_with_token_with_gcn_and_source_write_acls
-                    # Groups new counterpart sources are saved to.
+                    # Writes are attributed to this user. 1 is the super admin a
+                    # fresh deployment provisions; point it at a bot user to keep
+                    # the provenance clean.
+                    user_id: 1
                     group_ids: []
-                    # SkyPortal instrument_id used when a circular's telescope is
-                    # not in instrument_map. Photometry rows that resolve to
-                    # neither are dropped to a comment (SkyPortal requires one).
+                    # SkyPortal requires an instrument_id on every photometry
+                    # point. Rows resolving to neither a mapped instrument nor
+                    # this default cannot be posted.
                     default_instrument_id: null
-                    # telescope_canonical -> SkyPortal instrument_id.
+                    # telescope_canonical -> SkyPortal instrument_id
                     instrument_map: {}
-                    timeout: 30
                 writes:
-                    # MASTER SWITCH. false = plan every request and log it, send
-                    # nothing. Flip to true only against an instance you mean to
-                    # write to.
+                    # false plans every write and logs it, committing nothing.
                     live: false
-                    # Individual write channels, all independent of `live`.
-                    alias: true            # POST /gcn_event/{dateobs}/alias
-                    source: true           # POST /sources  + /photometry
-                    confirm_in_gcn: true   # POST /sources_in_gcn/{dateobs}
-                    comment: true          # POST /gcn_event/{dateobs}/comments
-                    tag: false             # POST /gcn_event/{dateobs}/tags
-                    # Tag applied to an event once an optical counterpart lands.
-                    counterpart_tag: HAS-OPTICAL-COUNTERPART
+                    alias: true
+                    source: true
+                    confirm_in_gcn: true
+                    comment: true
                 resolver:
-                    # How a circular's event name becomes a SkyPortal dateobs.
-                    # Tried in order; first hit wins.
-                    #   alias      - GET /gcn_event?partialdateobs=<name>
-                    #   designation- decode the date out of "GRB 260604C" and
-                    #                search that UTC day
-                    #   trigger    - the circular's own trigger_time, +/- window
+                    # Rungs tried in order; first hit wins.
+                    #   alias       substring match on GcnEvent.aliases
+                    #   designation the UTC date encoded in "GRB 260604C"
+                    #   trigger     the circular's own trigger time
                     order: [alias, designation, trigger]
-                    # Half-width of the dateobs search window, hours. A GRB
-                    # designation only fixes the UTC day, so a burst just after
-                    # midnight can sit in the neighbouring day's events.
+                    # Only used for the first circular of an event, before any
+                    # alias exists; a designation fixes the day but not the time,
+                    # so the search centres on noon and 12 hours spans that day.
                     window_hours: 12
-                    # Cone radius (arcsec) for matching an extracted counterpart
-                    # position against sources already on the event.
-                    match_radius_arcsec: 5.0
-                    # Circulars whose event never resolves are parked here and
-                    # retried on the interval below (events are often created in
-                    # SkyPortal after the first circular arrives).
+                    localization_cumprob: 0.95
                     retry_interval_seconds: 900
                     retry_max_age_hours: 72
                 extractor:
-                    # regex | llama | hybrid. hybrid is Circex's measured
-                    # production routing: regex for names/coordinates, the
-                    # constrained LLM for photometry/redshift/classification.
+                    # regex | llama | hybrid
                     kind: hybrid
-                    # llama.cpp OpenAI-compatible server on MSI agc03 (see
-                    # bin/tunnel.sh), or localhost when co-located. Two are up:
-                    #   8080  bartowski/Mistral-7B-Instruct-v0.3-GGUF:Q4_K_M
-                    #   8081  ggml-org/Qwen3.8-27B-GGUF:Q8_0
-                    # llama_model must match what the port serves — the server
-                    # uses it to pick the model, it is not a free-text label.
-                    llama_url: http://localhost:8080
-                    llama_model: bartowski/Mistral-7B-Instruct-v0.3-GGUF:Q4_K_M
+                    # llama.cpp OpenAI-compatible server; empty falls back to a
+                    # local server on the default port.
+                    llama_url:
+                    # llama_require_fields is model-specific and must match:
+                    #   Mistral-7B  false, or it pads photometry with invented rows
+                    #   Qwen3-27B   true, or it returns {} for every circular
+                    llama_model:
                     llama_timeout: 300
-                    # Name every field in the grammar's `required`. Which way
-                    # this cuts is model-specific, so it tracks llama_model:
-                    #   Mistral  false — requiring the fields makes it pad the
-                    #            photometry array with fabricated rows.
-                    #   Qwen3    true  — otherwise it returns {} for every
-                    #            circular, since {} satisfies an empty required.
-                    # See circex docs/known_issues.md, Sprint 7.
                     llama_require_fields: false
-                    # Bearer token, for a server reached over the internet
-                    # rather than an ssh tunnel (e.g. babamul.umn.edu/llm).
-                    # A llama-server on localhost needs none. Keep the real
-                    # value out of version control.
-                    llama_api_key: null
-                    # Trained SN-type classifier (circex classify-train). Null
-                    # disables classification from the regex side.
+                    llama_api_key:
                     sn_type_model: null
-                    # LLM response cache; survives restarts.
-                    cache_path: data/llm_cache.sqlite
+                    cache_path: data/circex_llm_cache.sqlite
                 consumer:
-                    # Live GCN Kafka stream. Needs the `live` extra and GCN
-                    # credentials (https://gcn.nasa.gov/quickstart).
+                    # Needs the `live` extra and GCN credentials.
                     enabled: false
                     topic: gcn.circulars
                     server: gcn.nasa.gov
-                    client_id: null
-                    client_secret: null
-                    # Kafka consumer group. MUST be stable across restarts —
-                    # that is what makes the service resume where it stopped
-                    # instead of replaying or skipping the stream. It must also
-                    # be distinct from any other Circex consumer reading the
-                    # same topic, or the two will split the partitions between
-                    # them and each will see only part of the stream.
-                    group_id: null
-                    # Where a brand-new group starts. `latest` ignores the
-                    # backlog; use `earliest` for a deliberate backfill.
+                    client_id:
+                    client_secret:
+                    # Must be stable across restarts and distinct from any other
+                    # consumer of this topic.
+                    group_id: circex
                     offset_reset: latest
-                    # Replay a directory of {id}.json circulars instead of Kafka.
-                    # Takes precedence over the stream when set.
                     replay_dir: null
                 archive:
-                    # Circex archive of raw circulars, used to walk the xref graph
-                    # and to backfill an event. Null = fetch from gcn.nasa.gov.
+                    # Local circular archive for the xref walk; null fetches from
+                    # gcn.nasa.gov.
                     dir: null
-                auth:
-                    # Bearer token required on incoming requests to this service.
-                    # Null disables auth (dev only).
-                    incoming_bearer_token: null

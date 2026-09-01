@@ -1,28 +1,8 @@
-"""The circular -> GcnEvent path, driven over the vendored GRB 260604C flurry."""
-
-from collections import Counter
+"""Pure helpers. The write path is exercised in fritz's in-container tests."""
 
 import pytest
 
 import pipeline
-from tests.conftest import EVENT, requires_extractions
-
-
-@pytest.fixture
-def run(cfg, client, flurry):
-    """Replay the whole flurry; return (results, client, state)."""
-    from circex.consume.sources import dir_fetch, replay_dir_records
-
-    extractor = pipeline.build_extractor(cfg)
-    fetch = dir_fetch(flurry)
-    state = pipeline.SessionState()
-    results = [
-        pipeline.process_circular(
-            record, extractor=extractor, client=client, fetch=fetch, cfg=cfg, state=state
-        )
-        for record in replay_dir_records(flurry)
-    ]
-    return results, client, state
 
 
 def test_mjd_to_iso_round_trips_a_known_epoch():
@@ -35,12 +15,14 @@ def test_build_extractor_rejects_an_unknown_kind(cfg):
         pipeline.build_extractor(cfg)
 
 
-def test_detection_window_brackets_the_photometry():
-    class Point:
-        def __init__(self, mjd):
-            self.mjd = mjd
+class _Point:
+    def __init__(self, mjd, filter="ztfg"):
+        self.mjd = mjd
+        self.filter = filter
 
-    start, end = pipeline.detection_window([Point(61195.0), Point(61197.0)], pad_days=1.0)
+
+def test_detection_window_brackets_the_photometry():
+    start, end = pipeline.detection_window([_Point(61195.0), _Point(61197.0)], pad_days=1.0)
     assert start.startswith("2026-06-03")
     assert end.startswith("2026-06-07")
 
@@ -49,128 +31,26 @@ def test_detection_window_is_none_without_photometry():
     assert pipeline.detection_window([]) is None
 
 
-@requires_extractions
-def test_flurry_binds_to_one_event(run):
-    results, _, _ = run
-    posted = [r for r in results if r.status == "posted"]
-    assert posted, "no circular resolved to a GcnEvent"
-    assert {r.dateobs for r in posted} == {EVENT["dateobs"]}
-    assert {r.obj_id for r in posted} == {"GRB260604C"}
+class _Event:
+    def __init__(self, name):
+        self.event_name = name
 
 
-@requires_extractions
-def test_photometry_accumulates_and_deduplicates(run):
-    results, client, _ = run
-    posted_points = len(client.paths("/photometry"))
-    assert posted_points > 0
-    # Every point posted exactly once across the flurry.
-    assert posted_points == sum(r.photometry_posted for r in results)
-    assert sum(r.photometry_skipped for r in results) > 0, "flurry should overlap"
+class _Extraction:
+    def __init__(self, name):
+        self.event = _Event(name)
 
 
-@requires_extractions
-def test_repeated_circulars_do_not_repost_the_alias(run):
-    _, client, _ = run
-    aliases = [w["payload"]["alias"] for w in client.paths("/alias")]
-    assert aliases == list(dict.fromkeys(aliases)), "an alias was posted twice"
+class _Actions:
+    def __init__(self, names):
+        self.extractions = [_Extraction(n) for n in names]
 
 
-@requires_extractions
-def test_the_event_is_tagged_once(run):
-    _, client, _ = run
-    assert len(client.paths("/tags")) <= 1
+def test_designations_sort_ahead_of_counterpart_names():
+    """A counterpart name never resolves an event, so it must not be tried first."""
+    names = pipeline.event_names(_Actions([["AT2017gfo", "GW170817"]]))
+    assert names == ["GW170817", "AT2017gfo"]
 
 
-@requires_extractions
-def test_the_source_is_not_reupserted_at_an_unchanged_position(run):
-    results, client, _ = run
-    upserts = client.paths("/sources")
-    upserts = [w for w in upserts if w["path"] == "/sources"]
-    positions = {(w["payload"]["ra"], w["payload"]["dec"]) for w in upserts}
-    assert len(upserts) == len(positions), "same position upserted twice"
-
-
-@requires_extractions
-def test_photometry_carries_the_event_and_its_circular(run):
-    _, client, _ = run
-    for write in client.paths("/photometry"):
-        altdata = write["payload"]["altdata"]
-        assert altdata["gcn_dateobs"] == EVENT["dateobs"]
-        assert "circex_circular_id" in altdata
-
-
-@requires_extractions
-def test_an_unknown_event_parks_rather_than_posting(cfg, flurry):
-    from circex.consume.sources import dir_fetch, replay_dir_records
-
-    from tests.conftest import FakeSkyPortal
-
-    client = FakeSkyPortal(events=[])  # SkyPortal knows of no events at all
-    extractor = pipeline.build_extractor(cfg)
-    results = [
-        pipeline.process_circular(
-            record,
-            extractor=extractor,
-            client=client,
-            fetch=dir_fetch(flurry),
-            cfg=cfg,
-            state=pipeline.SessionState(),
-        )
-        for record in replay_dir_records(flurry)
-    ]
-    assert Counter(r.status for r in results)["unresolved-event"] > 0
-    assert client.plan == [], "nothing may be written for an unresolved event"
-
-
-@requires_extractions
-def test_writes_switched_off_produce_no_requests(cfg, client, flurry):
-    from circex.consume.sources import dir_fetch, replay_dir_records
-
-    cfg["writes"] = dict.fromkeys(["source", "alias", "confirm_in_gcn", "comment", "tag"], False)
-    extractor = pipeline.build_extractor(cfg)
-    state = pipeline.SessionState()
-    for record in replay_dir_records(flurry):
-        pipeline.process_circular(
-            record,
-            extractor=extractor,
-            client=client,
-            fetch=dir_fetch(flurry),
-            cfg=cfg,
-            state=state,
-        )
-    assert client.plan == []
-
-
-@requires_extractions
-def test_photometry_already_in_skyportal_is_not_reposted(cfg, flurry):
-    """A restart must not re-post a light curve SkyPortal already holds."""
-    from circex.consume.sources import dir_fetch, replay_dir_records
-
-    from tests.conftest import FakeSkyPortal
-
-    def replay(client):
-        extractor = pipeline.build_extractor(cfg)
-        state = pipeline.SessionState()
-        for record in replay_dir_records(flurry):
-            pipeline.process_circular(
-                record,
-                extractor=extractor,
-                client=client,
-                fetch=dir_fetch(flurry),
-                cfg=cfg,
-                state=state,
-            )
-        return client
-
-    first = replay(FakeSkyPortal())
-    posted = [w["payload"] for w in first.paths("/photometry")]
-    assert posted, "first run posted nothing"
-
-    # Second process, same SkyPortal: everything the first run wrote is now there.
-    already = {}
-    for payload in posted:
-        already.setdefault(payload["obj_id"], []).append(
-            (payload["obj_id"], payload["filter"], payload["mjd"])
-        )
-    second = replay(FakeSkyPortal(photometry=already))
-    assert second.paths("/photometry") == [], "restart re-posted existing photometry"
+def test_event_names_are_deduplicated():
+    assert pipeline.event_names(_Actions(["GRB 260604C", "GRB 260604C"])) == ["GRB 260604C"]

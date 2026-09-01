@@ -8,9 +8,8 @@ and the parts that have no structured home as a comment.
 
 Resolution rungs, in config order:
 
-  alias       GET /gcn_event?partialdateobs=<name> — matches a dateobs prefix OR
-              a substring of the event's aliases, so "S260604a" finds the
-              LVC#S260604a written by the notice ingester.
+  alias       a substring match against GcnEvent.aliases, so "S260604a" finds
+              the LVC#S260604a the notice ingester wrote.
   designation GRB/GW/EP/SVOM names encode their own UTC date; search that day.
   trigger     the circular's own trigger_time, +/- window_hours.
 
@@ -23,7 +22,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 log = logging.getLogger("circex_plugin.gcn_event")
@@ -36,6 +35,7 @@ _DESIGNATION_PATTERNS = (
     re.compile(r"(?i)\bS(\d{6})[a-z]{1,2}\b"),  # LVK superevent
     re.compile(r"(?i)\bEP(\d{6})[a-z]?\b"),
     re.compile(r"(?i)\bSVOM[\s_-]?(\d{6})[A-Z]?\b"),
+    re.compile(r"(?i)\bIC(\d{6})[A-Z]?\b"),  # IceCube
 )
 
 # Two-digit year pivot. The GCN archive starts in 1997, so 90+ is last century.
@@ -73,137 +73,175 @@ class EventMatch:
         return self.localizations[0].get("localization_name") if self.localizations else None
 
 
-def _events_from(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
-    events = (payload or {}).get("events")
-    return events if isinstance(events, list) else []
+async def _events_in_window(session, centre, hours):
+    import sqlalchemy as sa
+    from skyportal.models import GcnEvent
+
+    return (
+        await session.scalars(
+            sa.select(GcnEvent).where(
+                GcnEvent.dateobs >= centre - timedelta(hours=hours),
+                GcnEvent.dateobs <= centre + timedelta(hours=hours),
+            )
+        )
+    ).all()
 
 
-def _to_match(event: dict[str, Any], matched_by: str) -> EventMatch | None:
-    dateobs = event.get("dateobs")
-    if not dateobs:
-        return None
+async def _events_by_alias(session, needle):
+    """Events whose aliases contain `needle`, ignoring case and spaces."""
+    import sqlalchemy as sa
+    from skyportal.models import GcnEvent
+
+    pattern = f"%{needle.replace(' ', '').lower()}%"
+    return (
+        await session.scalars(
+            sa.select(GcnEvent).where(
+                sa.func.replace(sa.func.lower(sa.cast(GcnEvent.aliases, sa.String)), " ", "").like(
+                    pattern
+                )
+            )
+        )
+    ).all()
+
+
+def _to_match(event, matched_by):
     return EventMatch(
-        dateobs=str(dateobs),
-        aliases=list(event.get("aliases") or []),
-        localizations=list(event.get("localizations") or []),
+        dateobs=event.dateobs,
+        aliases=list(event.aliases or []),
+        localizations=[loc.localization_name for loc in (event.localizations or [])],
         matched_by=matched_by,
     )
 
 
-def _search_window(client: Any, centre: datetime, window_hours: float) -> list[dict[str, Any]]:
-    return _events_from(
-        client.get(
-            "/gcn_event",
-            {
-                "startDate": (centre - timedelta(hours=window_hours)).isoformat(),
-                "endDate": (centre + timedelta(hours=window_hours)).isoformat(),
-                "numPerPage": 50,
-            },
-        )
-    )
-
-
-def _pick(events: list[dict[str, Any]], centre: datetime | None) -> dict[str, Any] | None:
-    """One event out of a window. Nearest in time to `centre` when we have one."""
+def _pick(events, centre):
+    """One event out of several. Nearest in time to `centre` when we have one."""
     if not events:
         return None
     if centre is None or len(events) == 1:
         return events[0]
-
-    def distance(event: dict[str, Any]) -> float:
-        try:
-            when = datetime.fromisoformat(str(event["dateobs"])).replace(tzinfo=UTC)
-        except (KeyError, ValueError):
-            return float("inf")
-        return abs((when - centre).total_seconds())
-
-    return min(events, key=distance)
+    centre = centre.replace(tzinfo=None)
+    return min(events, key=lambda e: abs((e.dateobs - centre).total_seconds()))
 
 
-def resolve_event(
-    client: Any,
-    *,
-    names: list[str],
-    trigger_time: datetime | None = None,
-    order: list[str] | None = None,
-    window_hours: float = 12.0,
-) -> EventMatch | None:
+async def resolve_event(session, *, names, trigger_time=None, order=None, window_hours=12.0):
     """First rung that hits wins. None means the event isn't in SkyPortal yet."""
     order = order or ["alias", "designation", "trigger"]
     for rung in order:
         if rung == "alias":
             for name in names:
-                # Query both spellings: circulars write "GRB 260604C", notices
-                # and TACH write "GRB260604C".
-                for spelling in dict.fromkeys([name, name.replace(" ", "")]):
-                    events = _events_from(
-                        client.get("/gcn_event", {"partialdateobs": spelling, "numPerPage": 50})
-                    )
-                    picked = _pick(events, trigger_time)
-                    if picked is not None:
-                        return _to_match(picked, f"alias:{spelling}")
+                picked = _pick(await _events_by_alias(session, name), trigger_time)
+                if picked is not None:
+                    return _to_match(picked, f"alias:{name}")
         elif rung == "designation":
             for name in names:
                 day = parse_designation(name)
                 if day is None:
                     continue
-                centre = datetime(day.year, day.month, day.day, 12, tzinfo=UTC)
-                picked = _pick(_search_window(client, centre, 12.0), trigger_time or centre)
+                centre = datetime(day.year, day.month, day.day, 12)
+                picked = _pick(
+                    await _events_in_window(session, centre, 12.0), trigger_time or centre
+                )
                 if picked is not None:
                     return _to_match(picked, f"designation:{name}")
         elif rung == "trigger" and trigger_time is not None:
-            picked = _pick(_search_window(client, trigger_time, window_hours), trigger_time)
+            centre = trigger_time.replace(tzinfo=None)
+            picked = _pick(await _events_in_window(session, centre, window_hours), trigger_time)
             if picked is not None:
                 return _to_match(picked, "trigger")
     return None
 
 
-def write_event_bindings(
-    client: Any,
-    match: EventMatch,
+async def write_event_bindings(
+    session,
+    writer,
+    match,
     *,
-    names: list[str],
-    obj_id: str | None,
-    comment: str | None,
-    detection_window: tuple[str, str] | None = None,
-    localization_cumprob: float = 0.95,
-    writes: dict[str, Any] | None = None,
-) -> None:
+    names,
+    obj_id,
+    comment,
+    detection_window=None,
+    localization_cumprob=0.95,
+    writes=None,
+):
     """Attach the extraction to the event: aliases, counterpart, comment, tag."""
     writes = writes or {}
-    dateobs = match.dateobs
-
-    if writes.get("alias", True):
-        for name in names:
-            if name and name not in match.aliases:
-                client.request("POST", f"/gcn_event/{dateobs}/alias", {"alias": name})
+    fresh = [n for n in names if n and not _alias_present(match.aliases, n)]
+    if fresh and writes.get("alias", True):
+        writer._record("alias", {"dateobs": str(match.dateobs), "aliases": fresh})
+        if writer.live:
+            await _add_aliases(session, match.dateobs, fresh)
 
     if obj_id is not None and writes.get("confirm_in_gcn", True):
-        # sources_in_gcn confirms a source *against a localization*, so an event
-        # with no skymap yet (many GRB circulars) cannot take the association.
-        localization_name = match.localization_name
-        if localization_name is None:
-            log.info("event %s has no localization; skipping sources_in_gcn", dateobs)
+        # sources_in_gcn confirms a source against a localization, so an event
+        # with no skymap yet cannot take the association.
+        if not match.localizations:
+            log.info("event %s has no localization; skipping sources_in_gcn", match.dateobs)
         elif detection_window is None:
             log.info("no detection window for %s; skipping sources_in_gcn", obj_id)
         else:
-            start, end = detection_window
-            client.request(
-                "POST",
-                f"/sources_in_gcn/{dateobs}",
+            writer._record(
+                "sources_in_gcn",
                 {
+                    "dateobs": str(match.dateobs),
                     "source_id": obj_id,
-                    "confirmed": True,
-                    "localization_name": localization_name,
+                    "localization_name": match.localizations[0],
                     "localization_cumprob": localization_cumprob,
-                    "start_date": start,
-                    "end_date": end,
                 },
             )
+            if writer.live:
+                await _confirm_source(session, match, obj_id, localization_cumprob)
 
     if comment and writes.get("comment", True):
-        client.request("POST", f"/gcn_event/{dateobs}/comments", {"text": comment})
+        writer._record("comment", {"dateobs": str(match.dateobs), "text": comment})
+        if writer.live:
+            await _add_comment(session, match.dateobs, comment, writer.user_id)
 
-    if obj_id is not None and writes.get("tag", False):
-        tag = writes.get("counterpart_tag", "HAS-OPTICAL-COUNTERPART")
-        client.request("POST", f"/gcn_event/{dateobs}/tags", {"text": tag})
+
+def _alias_present(aliases, name):
+    needle = name.replace(" ", "").lower()
+    return any(needle in str(a).replace(" ", "").lower() for a in aliases)
+
+
+async def _add_aliases(session, dateobs, names):
+    import sqlalchemy as sa
+    from skyportal.models import GcnEvent
+    from sqlalchemy.orm.attributes import flag_modified
+
+    event = await session.scalar(sa.select(GcnEvent).where(GcnEvent.dateobs == dateobs))
+    if event is None:
+        return
+    event.aliases = list(event.aliases or []) + list(names)
+    flag_modified(event, "aliases")
+
+
+async def _add_comment(session, dateobs, text, user_id):
+    import sqlalchemy as sa
+    from skyportal.models import CommentOnGCN, GcnEvent
+
+    event = await session.scalar(sa.select(GcnEvent).where(GcnEvent.dateobs == dateobs))
+    if event is None:
+        return
+    session.add(CommentOnGCN(text=text, gcn_id=event.id, author_id=user_id, bot=True))
+
+
+async def _confirm_source(session, match, obj_id, cumprob):
+    import sqlalchemy as sa
+    from skyportal.models import SourcesConfirmedInGCN
+
+    existing = await session.scalar(
+        sa.select(SourcesConfirmedInGCN).where(
+            SourcesConfirmedInGCN.dateobs == match.dateobs,
+            SourcesConfirmedInGCN.obj_id == obj_id,
+        )
+    )
+    if existing is not None:
+        return
+    session.add(
+        SourcesConfirmedInGCN(
+            dateobs=match.dateobs,
+            obj_id=obj_id,
+            confirmed=True,
+            localization_name=match.localizations[0],
+            localization_cumprob=cumprob,
+        )
+    )

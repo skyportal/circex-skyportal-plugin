@@ -1,0 +1,104 @@
+"""Write Circex extractions through SkyPortal's own models.
+
+The plugin runs inside SkyPortal, so it writes through the same functions
+SkyPortal uses on itself rather than over the REST API. `post_source_async` and
+`add_external_photometry` carry the permission checks, the default-share groups
+and the photometry deduplication index, none of which we want to reimplement.
+
+Nothing is written unless `live` is set. In dry run the planned operations are
+recorded on `plan` and logged, which is what the tests assert against.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any
+
+log = logging.getLogger("circex_plugin.skyportal")
+
+
+@dataclass
+class SkyPortalWriter:
+    # Writes are attributed to this user; 1 is the super admin a fresh
+    # deployment provisions. Point it at a bot user to keep the provenance clean.
+    user_id: int = 1
+    live: bool = False
+    plan: list[dict[str, Any]] = field(default_factory=list)
+
+    def _record(self, op: str, payload: dict[str, Any]) -> None:
+        self.plan.append({"op": op, "payload": payload})
+        if not self.live:
+            log.info("dry-run %s %s", op, payload)
+
+    async def write_source(self, session: Any, source: Any, group_ids: list[int]) -> None:
+        payload = {"id": source.id, "ra": source.ra, "dec": source.dec}
+        if group_ids:
+            payload["group_ids"] = group_ids
+        self._record("source", payload)
+        if not self.live:
+            return
+        from skyportal.handlers.api.source import post_source_async
+
+        await post_source_async(payload, self.user_id, session, refresh_source=False)
+
+    async def write_photometry(self, session: Any, points: list[Any], group_ids: list[int]) -> int:
+        """Post photometry, one call per instrument.
+
+        The payload is column-oriented (PhotMagFlexible), and duplicates are
+        resolved against SkyPortal's unique deduplication index rather than by
+        tracking what this process has already sent.
+        """
+        by_instrument: dict[tuple[str, int], list[Any]] = defaultdict(list)
+        for point in points:
+            by_instrument[(point.obj_id, point.instrument_id)].append(point)
+
+        written = 0
+        for (obj_id, instrument_id), rows in by_instrument.items():
+            payload: dict[str, Any] = {
+                "obj_id": obj_id,
+                "instrument_id": instrument_id,
+                "mjd": [r.mjd for r in rows],
+                "filter": [r.filter for r in rows],
+                "magsys": [r.magsys for r in rows],
+                "mag": [r.mag for r in rows],
+                "magerr": [r.magerr for r in rows],
+                "limiting_mag": [r.limiting_mag for r in rows],
+                "altdata": [r.altdata for r in rows],
+                "origin": ["circex"] * len(rows),
+            }
+            if group_ids:
+                payload["group_ids"] = group_ids
+            self._record("photometry", {**payload, "n": len(rows)})
+            written += len(rows)
+            if not self.live:
+                continue
+            import sqlalchemy as sa
+            from skyportal.handlers.api.photometry import add_external_photometry
+            from skyportal.models import User
+
+            user = await session.scalar(sa.select(User).where(User.id == self.user_id))
+            await add_external_photometry(
+                payload, user, session, duplicates="update", refresh=False
+            )
+        return written
+
+    async def set_redshift(self, session: Any, obj_id: str, z: float, z_err: float | None) -> None:
+        self._record("redshift", {"obj_id": obj_id, "redshift": z, "redshift_error": z_err})
+        if not self.live:
+            return
+        import sqlalchemy as sa
+        from skyportal.models import Obj
+
+        obj = await session.scalar(sa.select(Obj).where(Obj.id == obj_id))
+        if obj is None:
+            log.warning("cannot set redshift: no source %s", obj_id)
+            return
+        obj.redshift = z
+        obj.redshift_error = z_err
+
+
+def render_plan(plan: list[dict[str, Any]]) -> str:
+    """Human-readable dump of planned writes, for dry-run output."""
+    return "\n".join(f"{p['op']}: {p['payload']}" for p in plan)

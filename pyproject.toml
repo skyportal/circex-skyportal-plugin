@@ -26,6 +26,7 @@ live = ["gcn-kafka>=0.3"]
 [dependency-groups]
 dev = [
   "pytest>=8.0",
+  "pytest-asyncio>=0.24",
   "ruff>=0.6",
 ]
 
@@ -36,6 +37,7 @@ compatible-with = [
 
 [tool.pytest.ini_options]
 addopts = "-q"
+asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 
