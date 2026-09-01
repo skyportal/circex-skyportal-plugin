@@ -69,6 +69,7 @@ def build_extractor(cfg: dict[str, Any]) -> Any:
         model_id=ecfg.get("llama_model") or "mistral-7b",
         cache=cache,
         timeout=float(ecfg.get("llama_timeout") or 300),
+        require_fields=bool(ecfg.get("llama_require_fields", False)),
     )
     if kind == "llama":
         return llm

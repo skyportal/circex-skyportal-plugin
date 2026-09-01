@@ -67,6 +67,14 @@ services:
                     llama_url: http://localhost:8080
                     llama_model: bartowski/Mistral-7B-Instruct-v0.3-GGUF:Q4_K_M
                     llama_timeout: 300
+                    # Name every field in the grammar's `required`. Which way
+                    # this cuts is model-specific, so it tracks llama_model:
+                    #   Mistral  false — requiring the fields makes it pad the
+                    #            photometry array with fabricated rows.
+                    #   Qwen3    true  — otherwise it returns {} for every
+                    #            circular, since {} satisfies an empty required.
+                    # See circex docs/known_issues.md, Sprint 7.
+                    llama_require_fields: false
                     # Trained SN-type classifier (circex classify-train). Null
                     # disables classification from the regex side.
                     sn_type_model: null
