@@ -96,7 +96,12 @@ class SkyPortalWriter:
         return written
 
     async def write_extraction(
-        self, session: Any, dateobs: Any, circular_id: int | None, data: dict[str, Any]
+        self,
+        session: Any,
+        dateobs: Any,
+        circular_id: int | None,
+        data: dict[str, Any],
+        circular_created_at: Any = None,
     ) -> None:
         """Store the structured extraction alongside the values derived from it.
 
@@ -104,7 +109,16 @@ class SkyPortalWriter:
         — provenance spans, redshift bounds, per-row telescopes — so keep the
         extraction itself for anything that wants to read it back.
         """
-        self._record("extraction", {"dateobs": str(dateobs), "circular_id": circular_id})
+        self._record(
+            "extraction",
+            {
+                "dateobs": str(dateobs),
+                "circular_id": circular_id,
+                "circular_created_at": str(circular_created_at)
+                if circular_created_at
+                else None,
+            },
+        )
         if not self.live:
             return
         import sqlalchemy as sa
@@ -119,12 +133,15 @@ class SkyPortalWriter:
         )
         if existing is not None:
             existing.data = data
+            if circular_created_at is not None:
+                existing.circular_created_at = circular_created_at
             return
         session.add(
             GcnEventExtraction(
                 dateobs=dateobs,
                 origin=ORIGIN,
                 circular_id=circular_id,
+                circular_created_at=circular_created_at,
                 data=data,
                 sent_by_id=self.user_id,
             )

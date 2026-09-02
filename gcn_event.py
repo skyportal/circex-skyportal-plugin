@@ -231,22 +231,21 @@ async def write_event_bindings(
         # have none, so synthesize a cone from the reported position first.
         if not match.localizations and position is not None and writes.get("localization", True):
             await ensure_localization(session, writer, match, *position)
-        if not match.localizations:
-            log.info("event %s has no localization; skipping sources_in_gcn", match.dateobs)
-        elif detection_window is None:
-            log.info("no detection window for %s; skipping sources_in_gcn", obj_id)
-        else:
-            writer._record(
-                "sources_in_gcn",
-                {
-                    "dateobs": str(match.dateobs),
-                    "source_id": obj_id,
-                    "localization_name": match.localizations[0],
-                    "localization_cumprob": localization_cumprob,
-                },
-            )
-            if writer.live:
-                await _confirm_source(session, match, obj_id, localization_cumprob)
+        # GcnEventObj links the obj to the event and carries a vetting status;
+        # it needs no localization, so the association is no longer gated on the
+        # event having a skymap or on a detection window being known.
+        writer._record(
+            "gcn_event_obj",
+            {"dateobs": str(match.dateobs), "source_id": obj_id, "status": "pending"},
+        )
+        if writer.live:
+            # The association is the optional part of the binding; the comment
+            # below is the record of what happened. Failing here used to abort
+            # before the comment was ever written.
+            try:
+                await _confirm_source(session, match, obj_id, writer.user_id)
+            except Exception as exc:
+                log.warning("could not associate %s with %s: %s", obj_id, match.dateobs, exc)
 
     if comment and writes.get("comment", True):
         writer._record("comment", {"dateobs": str(match.dateobs), "text": comment})
@@ -399,34 +398,66 @@ async def _add_aliases(session, dateobs, names):
     flag_modified(event, "aliases")
 
 
+COMMENT_MARKER = "Extracted by Circex"
+
+
 async def _add_comment(session, dateobs, text, user_id):
+    """Keep one Circex comment per event, rewritten as the event grows.
+
+    Every circular of an event re-states the whole aggregate, so posting a new
+    comment each time stacked near-identical summaries on the event: nine on
+    EP260901a from three circulars and two replays. The extraction rows keep the
+    per-circular history; the comment is the current view, so it is updated in
+    place rather than repeated.
+    """
     import sqlalchemy as sa
     from skyportal.models import CommentOnGCN, GcnEvent
 
     event = await session.scalar(sa.select(GcnEvent).where(GcnEvent.dateobs == dateobs))
     if event is None:
         return
+    existing = await session.scalar(
+        sa.select(CommentOnGCN)
+        .where(
+            CommentOnGCN.gcn_id == event.id,
+            CommentOnGCN.author_id == user_id,
+            CommentOnGCN.bot.is_(True),
+            CommentOnGCN.text.like(f"%{COMMENT_MARKER}%"),
+        )
+        .order_by(CommentOnGCN.created_at.desc())
+    )
+    if existing is not None:
+        if existing.text != text:
+            existing.text = text
+            log.info("updated the Circex comment on %s", dateobs)
+        return
     session.add(CommentOnGCN(text=text, gcn_id=event.id, author_id=user_id, bot=True))
 
 
-async def _confirm_source(session, match, obj_id, cumprob):
+async def _confirm_source(session, match, obj_id, user_id):
+    """Propose the source as associated with the event.
+
+    GcnEventObj carries a vetting status rather than the boolean the old
+    SourcesConfirmedInGCN did. An extractor proposes; a human rules. The
+    automated crossmatch writes "pending" for the same reason, so Circex
+    matches it rather than asserting a confirmation nobody made.
+    """
     import sqlalchemy as sa
-    from skyportal.models import SourcesConfirmedInGCN
+    from skyportal.models import GcnEventObj
 
     existing = await session.scalar(
-        sa.select(SourcesConfirmedInGCN).where(
-            SourcesConfirmedInGCN.dateobs == match.dateobs,
-            SourcesConfirmedInGCN.obj_id == obj_id,
+        sa.select(GcnEventObj).where(
+            GcnEventObj.dateobs == match.dateobs,
+            GcnEventObj.obj_id == obj_id,
         )
     )
     if existing is not None:
         return
     session.add(
-        SourcesConfirmedInGCN(
-            dateobs=match.dateobs,
+        GcnEventObj(
             obj_id=obj_id,
-            confirmed=True,
-            localization_name=match.localizations[0],
-            localization_cumprob=cumprob,
+            dateobs=match.dateobs,
+            status="pending",
+            confirmer_id=user_id,
         )
     )

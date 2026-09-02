@@ -194,3 +194,76 @@ def test_an_ipn_box_keeps_both_axes():
 def test_an_ipn_annulus_is_refused_rather_than_shrunk():
     """GCN 21735's strip is 99.7 deg across; narrowing it would invent precision."""
     assert gcn_event.localization_shape([49.85, 0.64]) is None
+
+
+@dataclass
+class FakeClassification:
+    classification: str = "Ia"
+
+
+def test_a_classification_reaches_the_comment():
+    """The field is `classification`; reading `class_name` silently found nothing."""
+    actions = FakeActions(
+        extractions=(FakeExtraction(classification=FakeClassification()),),
+    )
+    assert pipeline._classifications(actions) == ["Ia"]
+    assert "Classification: Ia" in pipeline.build_comment(
+        actions, [{"circularId": 1, "subject": "s"}]
+    )
+
+
+def test_the_circular_publication_date_is_read_from_the_feed():
+    """createdOn is milliseconds; the column is naive UTC, as the DB stores it."""
+    import datetime
+
+    record = {"circularId": 45497, "createdOn": 1788357488446}
+    got = pipeline._circular_datetime(record)
+    assert got == datetime.datetime(2026, 9, 2, 13, 58, 8, 446000)
+    assert got.tzinfo is None
+
+
+@pytest.mark.parametrize("record", [{}, {"createdOn": None}, {"createdOn": "nope"}])
+def test_a_missing_or_bad_timestamp_yields_no_date(record):
+    assert pipeline._circular_datetime(record) is None
+
+
+def test_a_missing_association_model_does_not_lose_the_comment():
+    """SourcesConfirmedInGCN is gone from SkyPortal; it used to abort the write."""
+    import asyncio
+
+    match = gcn_event.EventMatch(dateobs="2026-09-01T11:39:25", localizations=["bayestar"])
+    writer = FakeWriter(live=True)
+    calls = []
+
+    async def boom(*args):
+        calls.append(args)
+        raise ImportError("cannot import name 'SourcesConfirmedInGCN'")
+
+    original = gcn_event._confirm_source
+    added = []
+
+    async def fake_comment(session, dateobs, text, user_id):
+        added.append(text)
+
+    original_comment = gcn_event._add_comment
+    gcn_event._confirm_source = boom
+    gcn_event._add_comment = fake_comment
+    try:
+        asyncio.run(
+            gcn_event.write_event_bindings(
+                None,
+                writer,
+                match,
+                names=[],
+                obj_id="EP260901a",
+                comment="the record",
+                detection_window=("2026-09-01", "2026-09-03"),
+                writes={"alias": False},
+            )
+        )
+    finally:
+        gcn_event._confirm_source = original
+        gcn_event._add_comment = original_comment
+
+    assert calls, "the association should have been attempted"
+    assert added == ["the record"], "the comment must survive an association failure"

@@ -104,6 +104,9 @@ def detection_window(points: list[Any], pad_days: float = 1.0) -> tuple[str, str
     return mjd_to_iso(min(mjds) - pad_days), mjd_to_iso(max(mjds) + pad_days)
 
 
+# Identifies this event's Circex comment so later circulars update it in place.
+COMMENT_MARKER = "Extracted by Circex"
+
 GCN_CIRCULAR_URL = "https://gcn.nasa.gov/circulars/{circular_id}"
 
 # Enough measurement lines to see what the circular said, not so many that a
@@ -155,7 +158,7 @@ def build_comment(actions: Any, records: list[dict[str, Any]]) -> str:
 
     if actions.extractions:
         lines.append("")
-        lines.append(f"_Extracted by Circex ({actions.extractions[0].extraction_meta.extractor})._")
+        lines.append(f"_{COMMENT_MARKER} ({actions.extractions[0].extraction_meta.extractor})._")
     return "\n".join(lines)
 
 
@@ -219,10 +222,11 @@ def _written_lines(actions: Any) -> list[str]:
 
 
 def _classifications(actions: Any) -> list[str]:
+    """Class names from the extractions, in order, without repeats."""
     labels = []
     for extraction in actions.extractions:
         classification = getattr(extraction, "classification", None)
-        name = getattr(classification, "class_name", None) if classification else None
+        name = getattr(classification, "classification", None) if classification else None
         if name:
             labels.append(str(name))
     return list(dict.fromkeys(labels))
@@ -262,6 +266,7 @@ async def process_circular(
         records,
         extractor,
         instrument_map=spcfg.get("instrument_map") or {},
+        bandpass_instrument_map=spcfg.get("bandpass_instrument_map") or {},
         default_instrument_id=spcfg.get("default_instrument_id"),
         group_ids=group_ids,
     )
@@ -298,12 +303,14 @@ async def process_circular(
         # Needs skyportal with the gcneventextractions table; a deployment
         # without it should leave this off rather than fail every circular.
         try:
+            published = {r.get("circularId"): _circular_datetime(r) for r in records}
             for extraction in actions.extractions:
                 await writer.write_extraction(
                     session,
                     match.dateobs,
                     extraction.circular_id,
                     extraction.model_dump(mode="json"),
+                    published.get(extraction.circular_id),
                 )
         except Exception as exc:
             log.warning("could not store the extraction: %s", exc)
@@ -339,6 +346,17 @@ def _position(actions: Any) -> tuple[float, float, Any] | None:
     if actions.source is not None and actions.source.ra is not None:
         return actions.source.ra, actions.source.dec, None
     return None
+
+
+def _circular_datetime(record: dict[str, Any]) -> datetime | None:
+    """When GCN published this circular, from the feed's millisecond timestamp."""
+    raw = record.get("createdOn")
+    if raw is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(raw) / 1000, UTC).replace(tzinfo=None)
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def _trigger_time(records: list[dict[str, Any]]) -> datetime | None:

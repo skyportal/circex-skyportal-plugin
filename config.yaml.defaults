@@ -13,6 +13,11 @@ services:
                     # SkyPortal requires an instrument_id on every photometry
                     # point. Rows resolving to neither a mapped instrument nor
                     # this default cannot be posted.
+                    # bandpass -> SkyPortal instrument_id. Tried before
+                    # instrument_map: a bandpass names one instrument exactly,
+                    # where a telescope may carry several (EP has WXT and FXT),
+                    # and radio and X-ray rows carry a bandpass but no telescope.
+                    bandpass_instrument_map: {}
                     default_instrument_id: null
                     # telescope_canonical -> SkyPortal instrument_id
                     instrument_map: {}
