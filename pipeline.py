@@ -201,6 +201,20 @@ async def process_circular(
             z, z_err = actions.redshift
             await writer.set_redshift(session, actions.source.id, z, z_err)
 
+    if writes.get("extraction", False):
+        # Needs skyportal with the gcneventextractions table; a deployment
+        # without it should leave this off rather than fail every circular.
+        try:
+            for extraction in actions.extractions:
+                await writer.write_extraction(
+                    session,
+                    match.dateobs,
+                    extraction.circular_id,
+                    extraction.model_dump(mode="json"),
+                )
+        except Exception as exc:
+            log.warning("could not store the extraction: %s", exc)
+
     await gcn_event.write_event_bindings(
         session,
         writer,

@@ -44,3 +44,19 @@ async def test_writes_are_attributed_to_the_configured_user():
 
 def test_render_plan_is_readable():
     assert "source" in render_plan([{"op": "source", "payload": {"id": "X"}}])
+
+
+async def test_extraction_is_planned_but_not_written_in_dry_run():
+    writer = SkyPortalWriter(live=False)
+    await writer.write_extraction(None, "2026-06-04T20:20:37", 44834, {"event": "x"})
+    assert [p["op"] for p in writer.plan] == ["extraction"]
+    assert writer.plan[0]["payload"]["circular_id"] == 44834
+
+
+async def test_photometry_and_extraction_share_one_origin():
+    """Both are tagged by the same producer name, so they can be found together."""
+    from skyportal_db import ORIGIN
+
+    writer = SkyPortalWriter(live=False)
+    await writer.write_photometry(None, [_Point()], [])
+    assert writer.plan[0]["payload"]["origin"] == [ORIGIN]

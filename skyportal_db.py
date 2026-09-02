@@ -18,6 +18,9 @@ from typing import Any
 
 log = logging.getLogger("circex_plugin.skyportal")
 
+# Names this producer in GcnEventExtraction.origin and in Photometry.origin.
+ORIGIN = "circex"
+
 
 @dataclass
 class SkyPortalWriter:
@@ -66,7 +69,7 @@ class SkyPortalWriter:
                 "magerr": [r.magerr for r in rows],
                 "limiting_mag": [r.limiting_mag for r in rows],
                 "altdata": [r.altdata for r in rows],
-                "origin": ["circex"] * len(rows),
+                "origin": [ORIGIN] * len(rows),
             }
             if group_ids:
                 payload["group_ids"] = group_ids
@@ -83,6 +86,41 @@ class SkyPortalWriter:
                 payload, user, session, duplicates="update", refresh=False
             )
         return written
+
+    async def write_extraction(
+        self, session: Any, dateobs: Any, circular_id: int | None, data: dict[str, Any]
+    ) -> None:
+        """Store the structured extraction alongside the values derived from it.
+
+        The derived writes lose everything the SkyPortal schema has no place for
+        — provenance spans, redshift bounds, per-row telescopes — so keep the
+        extraction itself for anything that wants to read it back.
+        """
+        self._record("extraction", {"dateobs": str(dateobs), "circular_id": circular_id})
+        if not self.live:
+            return
+        import sqlalchemy as sa
+        from skyportal.models import GcnEventExtraction
+
+        existing = await session.scalar(
+            sa.select(GcnEventExtraction).where(
+                GcnEventExtraction.dateobs == dateobs,
+                GcnEventExtraction.origin == ORIGIN,
+                GcnEventExtraction.circular_id == circular_id,
+            )
+        )
+        if existing is not None:
+            existing.data = data
+            return
+        session.add(
+            GcnEventExtraction(
+                dateobs=dateobs,
+                origin=ORIGIN,
+                circular_id=circular_id,
+                data=data,
+                sent_by_id=self.user_id,
+            )
+        )
 
     async def set_redshift(self, session: Any, obj_id: str, z: float, z_err: float | None) -> None:
         self._record("redshift", {"obj_id": obj_id, "redshift": z, "redshift_error": z_err})

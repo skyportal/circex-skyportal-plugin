@@ -23,6 +23,9 @@ services:
                     source: true
                     confirm_in_gcn: true
                     comment: true
+                    # Store the structured extraction on the event. Needs a
+                    # skyportal with the gcneventextractions table.
+                    extraction: false
                 resolver:
                     # Rungs tried in order; first hit wins.
                     #   alias       substring match on GcnEvent.aliases
