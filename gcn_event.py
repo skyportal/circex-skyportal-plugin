@@ -78,15 +78,22 @@ class EventMatch:
 async def _events_in_window(session, centre, hours):
     import sqlalchemy as sa
     from skyportal.models import GcnEvent
+    from sqlalchemy.orm import selectinload
 
     return (
-        await session.scalars(
-            sa.select(GcnEvent).where(
-                GcnEvent.dateobs >= centre - timedelta(hours=hours),
-                GcnEvent.dateobs <= centre + timedelta(hours=hours),
+        (
+            await session.scalars(
+                sa.select(GcnEvent)
+                .where(
+                    GcnEvent.dateobs >= centre - timedelta(hours=hours),
+                    GcnEvent.dateobs <= centre + timedelta(hours=hours),
+                )
+                .options(selectinload(GcnEvent.localizations))
             )
         )
-    ).all()
+        .unique()
+        .all()
+    )
 
 
 async def _event_by_trigger_id(session, text):
@@ -98,28 +105,40 @@ async def _event_by_trigger_id(session, text):
     """
     import sqlalchemy as sa
     from skyportal.models import GcnEvent
+    from sqlalchemy.orm import selectinload
 
     candidates = {t for t in re.findall(r"\b[A-Za-z0-9_-]{6,}\b", text)}
     if not candidates:
         return None
-    return await session.scalar(sa.select(GcnEvent).where(GcnEvent.trigger_id.in_(candidates)))
+    return await session.scalar(
+        sa.select(GcnEvent)
+        .where(GcnEvent.trigger_id.in_(candidates))
+        .options(selectinload(GcnEvent.localizations))
+    )
 
 
 async def _events_by_alias(session, needle):
     """Events whose aliases contain `needle`, ignoring case and spaces."""
     import sqlalchemy as sa
     from skyportal.models import GcnEvent
+    from sqlalchemy.orm import selectinload
 
     pattern = f"%{needle.replace(' ', '').lower()}%"
     return (
-        await session.scalars(
-            sa.select(GcnEvent).where(
-                sa.func.replace(sa.func.lower(sa.cast(GcnEvent.aliases, sa.String)), " ", "").like(
-                    pattern
+        (
+            await session.scalars(
+                sa.select(GcnEvent)
+                .where(
+                    sa.func.replace(
+                        sa.func.lower(sa.cast(GcnEvent.aliases, sa.String)), " ", ""
+                    ).like(pattern)
                 )
+                .options(selectinload(GcnEvent.localizations))
             )
         )
-    ).all()
+        .unique()
+        .all()
+    )
 
 
 def _to_match(event, matched_by):
