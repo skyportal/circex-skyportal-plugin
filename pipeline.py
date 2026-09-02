@@ -304,12 +304,19 @@ async def process_circular(
         # without it should leave this off rather than fail every circular.
         try:
             published = {r.get("circularId"): _circular_datetime(r) for r in records}
+            subjects = {r.get("circularId"): (r.get("subject") or "").strip() for r in records}
             for extraction in actions.extractions:
+                data = extraction.model_dump(mode="json")
+                # The circular's title, alongside the extracted values: it is
+                # what describes a circular that yielded no measurements, and
+                # the schema has no field for it.
+                if subject := subjects.get(extraction.circular_id):
+                    data["subject"] = subject
                 await writer.write_extraction(
                     session,
                     match.dateobs,
                     extraction.circular_id,
-                    extraction.model_dump(mode="json"),
+                    data,
                     published.get(extraction.circular_id),
                 )
         except Exception as exc:
