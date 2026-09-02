@@ -53,24 +53,32 @@ class SkyPortalWriter:
         resolved against SkyPortal's unique deduplication index rather than by
         tracking what this process has already sent.
         """
-        by_instrument: dict[tuple[str, int], list[Any]] = defaultdict(list)
+        # Mag-space and flux-space rows carry different required keys, so they are
+        # grouped separately: one payload cannot be validated as both.
+        by_instrument: dict[tuple[str, int, bool], list[Any]] = defaultdict(list)
         for point in points:
-            by_instrument[(point.obj_id, point.instrument_id)].append(point)
+            flux_space = getattr(point, "is_flux_space", False)
+            by_instrument[(point.obj_id, point.instrument_id, flux_space)].append(point)
 
         written = 0
-        for (obj_id, instrument_id), rows in by_instrument.items():
+        for (obj_id, instrument_id, flux_space), rows in by_instrument.items():
             payload: dict[str, Any] = {
                 "obj_id": obj_id,
                 "instrument_id": instrument_id,
                 "mjd": [r.mjd for r in rows],
                 "filter": [r.filter for r in rows],
                 "magsys": [r.magsys for r in rows],
-                "mag": [r.mag for r in rows],
-                "magerr": [r.magerr for r in rows],
-                "limiting_mag": [r.limiting_mag for r in rows],
                 "altdata": [r.altdata for r in rows],
                 "origin": [ORIGIN] * len(rows),
             }
+            if flux_space:
+                payload["flux"] = [r.flux for r in rows]
+                payload["fluxerr"] = [r.fluxerr for r in rows]
+                payload["zp"] = [r.zp for r in rows]
+            else:
+                payload["mag"] = [r.mag for r in rows]
+                payload["magerr"] = [r.magerr for r in rows]
+                payload["limiting_mag"] = [r.limiting_mag for r in rows]
             if group_ids:
                 payload["group_ids"] = group_ids
             self._record("photometry", {**payload, "n": len(rows)})
