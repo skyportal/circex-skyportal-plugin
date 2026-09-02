@@ -114,9 +114,7 @@ class SkyPortalWriter:
             {
                 "dateobs": str(dateobs),
                 "circular_id": circular_id,
-                "circular_created_at": str(circular_created_at)
-                if circular_created_at
-                else None,
+                "circular_created_at": str(circular_created_at) if circular_created_at else None,
             },
         )
         if not self.live:
