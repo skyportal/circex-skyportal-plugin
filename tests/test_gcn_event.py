@@ -51,3 +51,32 @@ def test_undecodable_designations_return_none(name):
 )
 def test_alias_matching_ignores_case_and_spaces(aliases, name, found):
     assert gcn_event._alias_present(aliases, name) is found
+
+
+class _Event:
+    def __init__(self, dateobs):
+        self.dateobs = dateobs
+
+
+def test_ambiguous_day_without_a_trigger_time_resolves_to_nothing():
+    """Attaching a counterpart to the wrong event is worse than not attaching."""
+    from datetime import datetime
+
+    events = [_Event(datetime(2026, 6, 4, 8, 45)), _Event(datetime(2026, 6, 4, 20, 20))]
+    assert gcn_event._pick(events, None) is None
+
+
+def test_a_single_candidate_needs_no_trigger_time():
+    from datetime import datetime
+
+    only = _Event(datetime(2026, 6, 4, 20, 20))
+    assert gcn_event._pick([only], None) is only
+
+
+def test_trigger_time_separates_events_on_a_busy_day():
+    from datetime import UTC, datetime
+
+    fermi = _Event(datetime(2026, 6, 4, 8, 45))
+    svom = _Event(datetime(2026, 6, 4, 20, 20))
+    picked = gcn_event._pick([fermi, svom], datetime(2026, 6, 4, 20, 25, tzinfo=UTC))
+    assert picked is svom

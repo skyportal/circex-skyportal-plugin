@@ -185,6 +185,7 @@ async def process_circular(
         trigger_time=_trigger_time(records),
         order=rcfg.get("order"),
         window_hours=float(rcfg.get("window_hours") or 12),
+        text=" ".join(str(r.get("body") or "") for r in records),
     )
     if match is None:
         # The event usually appears within minutes; the caller parks the

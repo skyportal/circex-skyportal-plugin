@@ -26,9 +26,11 @@ services:
                 resolver:
                     # Rungs tried in order; first hit wins.
                     #   alias       substring match on GcnEvent.aliases
+                    #   trigger_id  an id in the circular text matching
+                    #               GcnEvent.trigger_id, e.g. sb26060404
                     #   designation the UTC date encoded in "GRB 260604C"
                     #   trigger     the circular's own trigger time
-                    order: [alias, designation, trigger]
+                    order: [alias, trigger_id, designation, trigger]
                     # Only used for the first circular of an event, before any
                     # alias exists; a designation fixes the day but not the time,
                     # so the search centres on noon and 12 hours spans that day.

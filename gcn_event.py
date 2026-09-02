@@ -10,6 +10,8 @@ Resolution rungs, in config order:
 
   alias       a substring match against GcnEvent.aliases, so "S260604a" finds
               the LVC#S260604a the notice ingester wrote.
+  trigger_id  an identifier in the circular text matching GcnEvent.trigger_id,
+              e.g. SVOM's "burst-id sb26060404".
   designation GRB/GW/EP/SVOM names encode their own UTC date; search that day.
   trigger     the circular's own trigger_time, +/- window_hours.
 
@@ -87,6 +89,22 @@ async def _events_in_window(session, centre, hours):
     ).all()
 
 
+async def _event_by_trigger_id(session, text):
+    """The event whose trigger_id appears verbatim in the circular.
+
+    Stronger than any date arithmetic: the notice and the circular are naming
+    the same trigger. Only reasonably distinctive ids are tried, since a short
+    numeric one would match digits anywhere in the prose.
+    """
+    import sqlalchemy as sa
+    from skyportal.models import GcnEvent
+
+    candidates = {t for t in re.findall(r"\b[A-Za-z0-9_-]{6,}\b", text)}
+    if not candidates:
+        return None
+    return await session.scalar(sa.select(GcnEvent).where(GcnEvent.trigger_id.in_(candidates)))
+
+
 async def _events_by_alias(session, needle):
     """Events whose aliases contain `needle`, ignoring case and spaces."""
     import sqlalchemy as sa
@@ -114,33 +132,49 @@ def _to_match(event, matched_by):
 
 
 def _pick(events, centre):
-    """One event out of several. Nearest in time to `centre` when we have one."""
+    """One event out of several, or None when the choice would be a guess.
+
+    A designation fixes the burst's day, and a busy day holds several events, so
+    without a time to compare against there is nothing to separate them.
+    Attaching a counterpart to the wrong event is worse than not attaching it,
+    so an ambiguous day is left for the retry queue rather than resolved.
+    """
     if not events:
         return None
-    if centre is None or len(events) == 1:
+    if len(events) == 1:
         return events[0]
+    if centre is None:
+        log.info(
+            "ambiguous event day: %d candidates and no trigger time; not resolving",
+            len(events),
+        )
+        return None
     centre = centre.replace(tzinfo=None)
     return min(events, key=lambda e: abs((e.dateobs - centre).total_seconds()))
 
 
-async def resolve_event(session, *, names, trigger_time=None, order=None, window_hours=12.0):
+async def resolve_event(
+    session, *, names, trigger_time=None, order=None, window_hours=12.0, text=""
+):
     """First rung that hits wins. None means the event isn't in SkyPortal yet."""
-    order = order or ["alias", "designation", "trigger"]
+    order = order or ["alias", "trigger_id", "designation", "trigger"]
     for rung in order:
         if rung == "alias":
             for name in names:
                 picked = _pick(await _events_by_alias(session, name), trigger_time)
                 if picked is not None:
                     return _to_match(picked, f"alias:{name}")
+        elif rung == "trigger_id" and text:
+            picked = await _event_by_trigger_id(session, text)
+            if picked is not None:
+                return _to_match(picked, "trigger_id")
         elif rung == "designation":
             for name in names:
                 day = parse_designation(name)
                 if day is None:
                     continue
                 centre = datetime(day.year, day.month, day.day, 12)
-                picked = _pick(
-                    await _events_in_window(session, centre, 12.0), trigger_time or centre
-                )
+                picked = _pick(await _events_in_window(session, centre, 12.0), trigger_time)
                 if picked is not None:
                     return _to_match(picked, f"designation:{name}")
         elif rung == "trigger" and trigger_time is not None:
