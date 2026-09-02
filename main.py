@@ -21,8 +21,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 import pipeline
 from skyportal_db import SkyPortalWriter, render_plan
 
@@ -32,15 +30,13 @@ log = logging.getLogger("circex_plugin")
 PENDING: list[tuple[datetime, dict[str, Any]]] = []
 
 
-def load_config(path: Path | None) -> dict[str, Any]:
-    """Config from an explicit YAML file, else from SkyPortal's own stack."""
-    if path is not None:
-        node = yaml.safe_load(path.read_text())
-        for key in ("services", "external", "circex", "params"):
-            if not isinstance(node, dict) or key not in node:
-                return node if isinstance(node, dict) else {}
-            node = node[key]
-        return node
+def load_config() -> dict[str, Any]:
+    """Config from SkyPortal's own stack.
+
+    baselayer is started with several --config flags and load_env merges them in
+    order; parsing them here instead would take only the last, which is the
+    secret overlay without the defaults under it.
+    """
     from baselayer.app.env import load_env
 
     _, app_cfg = load_env()
@@ -251,11 +247,11 @@ async def replay(cfg: dict[str, Any], directory: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, help="YAML config (else SkyPortal's stack)")
     parser.add_argument("--replay", type=Path, help="Process a directory of circulars and exit")
-    args = parser.parse_args()
+    # baselayer passes its own --config flags through; leave them to load_env.
+    args, _ = parser.parse_known_args()
 
-    cfg = load_config(args.config)
+    cfg = load_config()
     if args.replay is not None:
         return asyncio.run(replay(cfg, args.replay))
     asyncio.run(amain(cfg))
