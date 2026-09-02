@@ -17,6 +17,7 @@ archive.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -103,26 +104,120 @@ def detection_window(points: list[Any], pad_days: float = 1.0) -> tuple[str, str
     return mjd_to_iso(min(mjds) - pad_days), mjd_to_iso(max(mjds) + pad_days)
 
 
-def build_comment(actions: Any, circular_ids: list[int]) -> str:
-    """The event-level comment: what was extracted, and from which circulars."""
-    lines = ["Circex extraction from GCN circular(s) " + ", ".join(str(i) for i in circular_ids)]
+GCN_CIRCULAR_URL = "https://gcn.nasa.gov/circulars/{circular_id}"
+
+# Enough measurement lines to see what the circular said, not so many that a
+# large table buries the rest of the comment.
+_MAX_REPORTED_LINES = 12
+
+
+def build_comment(actions: Any, records: list[dict[str, Any]]) -> str:
+    """The event-level comment: what the circular reported, and what was written.
+
+    Both halves matter to a reader — the measurements restate the circular, and
+    the written/not-written sections say what actually reached the database, so a
+    thin light curve is distinguishable from data that was dropped.
+    """
+    lines: list[str] = []
+    for record in records:
+        circular_id = record.get("circularId")
+        subject = (record.get("subject") or "").strip()
+        header = f"**GCN {circular_id}**" if circular_id else "**GCN circular**"
+        if subject:
+            header += f" — {subject}"
+        lines.append(header)
+        if circular_id:
+            lines.append(GCN_CIRCULAR_URL.format(circular_id=circular_id))
+
+    reported = _reported_lines(actions)
+    if reported:
+        lines.append("")
+        lines.append("**Reported**")
+        lines.extend(reported)
+
+    written = _written_lines(actions)
+    lines.append("")
+    lines.append("**Written to SkyPortal**")
+    lines.extend(written or ["- nothing postable from this circular"])
+
+    if actions.skipped_reasons:
+        counts = Counter(actions.skipped_reasons)
+        lines.append("")
+        lines.append("**Not written**")
+        for reason, n in sorted(counts.items()):
+            lines.append(f"- {n} photometry row(s): {reason}")
+
+    notes = list(
+        dict.fromkeys(n for e in actions.extractions for n in e.extraction_meta.notes)
+    )
+    if notes:
+        lines.append("")
+        lines.append("**Notes**")
+        lines.extend(f"- {note}" for note in notes)
+
+    if actions.extractions:
+        lines.append("")
+        lines.append(f"_Extracted by Circex ({actions.extractions[0].extraction_meta.extractor})._")
+    return "\n".join(lines)
+
+
+def _reported_lines(actions: Any) -> list[str]:
+    """One line per measurement, as the circular states it."""
+    rows = [row for extraction in actions.extractions for row in extraction.photometry]
+    out: list[str] = []
+    for row in rows[:_MAX_REPORTED_LINES]:
+        measurement = _radio_measurement(row) if row.frequency_ghz else _optical_measurement(row)
+        if measurement is None:
+            continue
+        context = ", ".join(p for p in (row.telescope, _epoch(row)) if p)
+        out.append(f"- {measurement}" + (f" ({context})" if context else ""))
+    if len(rows) > _MAX_REPORTED_LINES:
+        out.append(f"- ...and {len(rows) - _MAX_REPORTED_LINES} more row(s)")
+    return out
+
+
+def _radio_measurement(row: Any) -> str | None:
+    unit = row.flux_density_unit or ""
+    band = f"{row.frequency_ghz:g} GHz"
+    if row.flux_density is not None:
+        error = f" +/- {row.flux_density_error:g}" if row.flux_density_error is not None else ""
+        return f"{band}: {row.flux_density:g}{error} {unit}".strip()
+    if row.limiting_flux_density is not None:
+        sigma = row.limiting_mag_sigma or 3.0
+        return f"{band}: < {row.limiting_flux_density:g} {unit} ({sigma:g} sigma)".strip()
+    return None
+
+
+def _optical_measurement(row: Any) -> str | None:
+    band = row.filter or row.bandpass or "unfiltered"
+    if row.mag is not None:
+        error = f" +/- {row.mag_error:g}" if row.mag_error is not None else ""
+        return f"{band} = {row.mag:g}{error}"
+    if row.limiting_mag is not None:
+        sigma = row.limiting_mag_sigma or 3.0
+        return f"{band} > {row.limiting_mag:g} ({sigma:g} sigma)"
+    return None
+
+
+def _epoch(row: Any) -> str:
+    return (row.obs_time or "").replace("T", " ").replace("Z", " UT").strip()
+
+
+def _written_lines(actions: Any) -> list[str]:
+    lines: list[str] = []
     if actions.source is not None:
         lines.append(
-            f"Counterpart: {actions.source.id} at RA={actions.source.ra}, Dec={actions.source.dec}"
+            f"- Source `{actions.source.id}` at RA={actions.source.ra}, Dec={actions.source.dec}"
         )
     if actions.photometry:
         bands = sorted({p.filter for p in actions.photometry})
-        lines.append(f"Photometry: {len(actions.photometry)} point(s) in {', '.join(bands)}")
+        lines.append(f"- {len(actions.photometry)} photometry point(s): {', '.join(bands)}")
     if actions.redshift is not None:
         z, z_err = actions.redshift
-        lines.append(f"Redshift: z = {z}" + (f" +/- {z_err}" if z_err is not None else ""))
+        lines.append(f"- Redshift z = {z}" + (f" +/- {z_err}" if z_err is not None else ""))
     for label in _classifications(actions):
-        lines.append(f"Classification: {label}")
-    for note in dict.fromkeys(n for e in actions.extractions for n in e.extraction_meta.notes):
-        lines.append(f"Note: {note}")
-    if actions.extractions:
-        lines.append(f"Extractor: {actions.extractions[0].extraction_meta.extractor}")
-    return "\n".join(lines)
+        lines.append(f"- Classification: {label}")
+    return lines
 
 
 def _classifications(actions: Any) -> list[str]:
@@ -221,7 +316,7 @@ async def process_circular(
         match,
         names=names,
         obj_id=actions.source.id,
-        comment=build_comment(actions, [r.get("circularId") for r in records]),
+        comment=build_comment(actions, records),
         detection_window=detection_window(actions.photometry),
         localization_cumprob=float(rcfg.get("localization_cumprob") or 0.95),
         writes=writes,
