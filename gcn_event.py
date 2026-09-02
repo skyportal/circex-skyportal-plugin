@@ -214,6 +214,7 @@ async def write_event_bindings(
     comment,
     detection_window=None,
     localization_cumprob=0.95,
+    position=None,
     writes=None,
 ):
     """Attach the extraction to the event: aliases, counterpart, comment, tag."""
@@ -226,7 +227,10 @@ async def write_event_bindings(
 
     if obj_id is not None and writes.get("confirm_in_gcn", True):
         # sources_in_gcn confirms a source against a localization, so an event
-        # with no skymap yet cannot take the association.
+        # with no skymap yet cannot take the association. Circular-only events
+        # have none, so synthesize a cone from the reported position first.
+        if not match.localizations and position is not None and writes.get("localization", True):
+            await ensure_localization(session, writer, match, *position)
         if not match.localizations:
             log.info("event %s has no localization; skipping sources_in_gcn", match.dateobs)
         elif detection_window is None:
@@ -248,6 +252,134 @@ async def write_event_bindings(
         writer._record("comment", {"dateobs": str(match.dateobs), "text": comment})
         if writer.live:
             await _add_comment(session, match.dateobs, comment, writer.user_id)
+
+
+# Bounds on a synthesized localization. Widening is safe and narrowing is not, so
+# the floor clamps but the ceiling refuses: an IPN annulus stated as 99.7 deg
+# across is not an ellipse, and shrinking it to fit would claim a precision the
+# circular never gave.
+MIN_LOCALIZATION_ERROR_DEG = 0.01
+MAX_LOCALIZATION_ERROR_DEG = 10.0
+DEFAULT_LOCALIZATION_ERROR_DEG = 0.05
+
+
+def cone_radius(ra_dec_error):
+    """Circex's ra_dec_error [deg] as a usable radius, or None if unrepresentable.
+
+    An ellipse arrives as [semi-major, semi-minor, position angle]; the radius is
+    the semi-major axis, the first element. The third is an angle, not a radius.
+    """
+    error = ra_dec_error
+    if isinstance(error, list):
+        error = next((e for e in error if isinstance(e, int | float)), None)
+    if not isinstance(error, int | float) or error <= 0:
+        error = DEFAULT_LOCALIZATION_ERROR_DEG
+    if float(error) > MAX_LOCALIZATION_ERROR_DEG:
+        return None
+    return max(float(error), MIN_LOCALIZATION_ERROR_DEG)
+
+
+def localization_shape(ra_dec_error):
+    """How to draw the region: an ellipse when both axes are known, else a cone.
+
+    IPN error boxes are long and thin (2.45 deg by 19 arcmin is typical), so a
+    circle enclosing one would be far larger than the region actually reported.
+    Returns None when the region is too large to represent.
+    """
+    axes = (
+        [e for e in ra_dec_error if isinstance(e, int | float) and e > 0]
+        if isinstance(ra_dec_error, list)
+        else []
+    )
+    if len(axes) >= 2:
+        amaj, amin = axes[0], axes[1]
+        if amaj > MAX_LOCALIZATION_ERROR_DEG:
+            return None
+        phi = axes[2] if len(axes) > 2 else 0.0
+        return {
+            "kind": "ellipse",
+            "amaj": max(amaj, MIN_LOCALIZATION_ERROR_DEG),
+            "amin": max(amin, MIN_LOCALIZATION_ERROR_DEG),
+            "phi": float(phi),
+        }
+    error = cone_radius(ra_dec_error)
+    return None if error is None else {"kind": "cone", "error": error}
+
+
+async def ensure_localization(session, writer, match, ra, dec, ra_dec_error=None):
+    """Give an event with no skymap a cone localization from the circular position.
+
+    Most events get a localization from a Notice. A circular-only event (a
+    Konus-Wind burst, say) arrives with none, and without one the source cannot
+    be associated with the event at all. Returns the localization name, or None.
+    """
+    if match.localizations:
+        return match.localizations[0]
+    if ra is None or dec is None:
+        return None
+
+    shape = localization_shape(ra_dec_error)
+    if shape is None:
+        log.info(
+            "stated localization for %s is too large to represent; not synthesizing",
+            match.dateobs,
+        )
+        return None
+    writer._record(
+        "localization",
+        {"dateobs": str(match.dateobs), "ra": ra, "dec": dec, **shape},
+    )
+    if not writer.live:
+        return None
+
+    import asyncio
+
+    import sqlalchemy as sa
+    from skyportal.handlers.api.gcn import add_tiles_and_properties_and_contour
+    from skyportal.models import Localization
+    from skyportal.utils.gcn import from_cone, from_ellipse
+
+    if shape["kind"] == "ellipse":
+        amaj, amin, phi = shape["amaj"], shape["amin"], shape["phi"]
+        name = f"circex_{ra:.5f}_{dec:.5f}_{amaj:.5f}_{amin:.5f}"
+        skymap = from_ellipse(name, ra, dec, amaj, amin, phi)
+    else:
+        skymap = from_cone(ra=ra, dec=dec, error=shape["error"])
+    skymap["dateobs"] = match.dateobs
+    name = skymap["localization_name"]
+
+    existing = await session.scalar(
+        sa.select(Localization).where(
+            Localization.dateobs == match.dateobs,
+            Localization.localization_name == name,
+        )
+    )
+    if existing is not None:
+        return name
+
+    localization = Localization(**skymap)
+    session.add(localization)
+    await session.commit()
+    log.info("created localization %s for %s", name, match.dateobs)
+
+    # Tiles are what sources_in_gcn queries, so they have to exist before the
+    # association is attempted. Deliberately not the obsplan variant — a cone
+    # derived from a circular should not queue observing plans.
+    try:
+        await asyncio.to_thread(
+            add_tiles_and_properties_and_contour,
+            localization.id,
+            writer.user_id,
+            None,
+            None,
+            False,
+        )
+    except Exception as exc:
+        log.warning("could not tile localization %s: %s", name, exc)
+        return None
+
+    match.localizations.insert(0, name)
+    return name
 
 
 def _alias_present(aliases, name):

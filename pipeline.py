@@ -147,9 +147,7 @@ def build_comment(actions: Any, records: list[dict[str, Any]]) -> str:
         for reason, n in sorted(counts.items()):
             lines.append(f"- {n} photometry row(s): {reason}")
 
-    notes = list(
-        dict.fromkeys(n for e in actions.extractions for n in e.extraction_meta.notes)
-    )
+    notes = list(dict.fromkeys(n for e in actions.extractions for n in e.extraction_meta.notes))
     if notes:
         lines.append("")
         lines.append("**Notes**")
@@ -318,11 +316,29 @@ async def process_circular(
         obj_id=actions.source.id,
         comment=build_comment(actions, records),
         detection_window=detection_window(actions.photometry),
+        position=_position(actions),
         localization_cumprob=float(rcfg.get("localization_cumprob") or 0.95),
         writes=writes,
     )
     result.status = "posted"
     return result
+
+
+def _position(actions: Any) -> tuple[float, float, Any] | None:
+    """(ra, dec, ra_dec_error) for a synthesized localization.
+
+    Read from the extraction rather than the source: an error region localizes
+    the event but is deliberately not written as a source, and that is precisely
+    the case a synthesized skymap exists for.
+    """
+    for extraction in actions.extractions:
+        localization = getattr(extraction, "localization", None)
+        if localization is None or localization.ra is None or localization.dec is None:
+            continue
+        return localization.ra, localization.dec, localization.ra_dec_error
+    if actions.source is not None and actions.source.ra is not None:
+        return actions.source.ra, actions.source.dec, None
+    return None
 
 
 def _trigger_time(records: list[dict[str, Any]]) -> datetime | None:
