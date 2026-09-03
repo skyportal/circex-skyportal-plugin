@@ -54,3 +54,18 @@ def test_designations_sort_ahead_of_counterpart_names():
 
 def test_event_names_are_deduplicated():
     assert pipeline.event_names(_Actions(["GRB 260604C", "GRB 260604C"])) == ["GRB 260604C"]
+
+
+def test_prepare_runs_without_a_session(monkeypatch):
+    """The slow half must not need a session; that is what keeps it out of the
+    transaction Postgres would time out."""
+    import pipeline
+
+    records = [{"circularId": 1, "body": "b", "subject": "s"}]
+    monkeypatch.setattr("circex.bot.aggregate.gather_by_xref", lambda *a, **k: records)
+    monkeypatch.setattr("circex.bot.aggregate.aggregate_event", lambda *a, **k: "actions")
+    got_records, actions = pipeline.prepare_circular(
+        {"circularId": 1}, extractor=None, fetch=None, cfg={}
+    )
+    assert got_records == records
+    assert actions == "actions"

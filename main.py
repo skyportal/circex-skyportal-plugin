@@ -67,6 +67,16 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
     """Run one circular through the pipeline in its own transaction."""
     from baselayer.app import models
 
+    # Fetch and extract before opening the session: an extraction can take
+    # minutes, and Postgres closes a transaction left idle that long.
+    prepared = await asyncio.to_thread(
+        pipeline.prepare_circular,
+        record,
+        extractor=ctx["extractor"],
+        fetch=ctx["fetch"],
+        cfg=ctx["cfg"],
+    )
+
     async with models.async_plain_session_factory() as session:
         result = await pipeline.process_circular(
             record,
@@ -75,6 +85,7 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
             writer=ctx["writer"],
             fetch=ctx["fetch"],
             cfg=ctx["cfg"],
+            prepared=prepared,
         )
         if ctx["writer"].live:
             await session.commit()

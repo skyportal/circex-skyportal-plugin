@@ -243,6 +243,34 @@ class ProcessResult:
     names: list[str] = field(default_factory=list)
 
 
+def prepare_circular(
+    record: dict[str, Any],
+    *,
+    extractor: Any,
+    fetch: Any,
+    cfg: dict[str, Any],
+) -> tuple[list[dict[str, Any]], Any]:
+    """Fetch the cross-referenced circulars and extract them.
+
+    Kept out of `process_circular` because both steps are slow — the extraction
+    can take minutes against a language model — and a database session held open
+    across them is closed under `idle_in_transaction_session_timeout`.
+    """
+    from circex.bot.aggregate import aggregate_event, gather_by_xref
+
+    spcfg = cfg.get("skyportal") or {}
+    records = gather_by_xref(int(record.get("circularId") or 0), fetch, max_hops=1)
+    actions = aggregate_event(
+        records,
+        extractor,
+        instrument_map=spcfg.get("instrument_map") or {},
+        bandpass_instrument_map=spcfg.get("bandpass_instrument_map") or {},
+        default_instrument_id=spcfg.get("default_instrument_id"),
+        group_ids=spcfg.get("group_ids") or [],
+    )
+    return records, actions
+
+
 async def process_circular(
     record: dict[str, Any],
     *,
@@ -251,24 +279,23 @@ async def process_circular(
     writer: Any,
     fetch: Any,
     cfg: dict[str, Any],
+    prepared: tuple[list[dict[str, Any]], Any] | None = None,
 ) -> ProcessResult:
-    """Extract one circular's event and bind it to its SkyPortal GcnEvent."""
-    from circex.bot.aggregate import aggregate_event, gather_by_xref
+    """Bind one circular's extraction to its SkyPortal GcnEvent and write it.
 
+    Pass `prepared` to reuse work done outside the transaction; without it the
+    fetch and extraction run here, holding the session open for their duration.
+    """
     circular_id = int(record.get("circularId") or 0)
     spcfg = cfg.get("skyportal") or {}
     rcfg = cfg.get("resolver") or {}
     writes = cfg.get("writes") or {}
     group_ids = spcfg.get("group_ids") or []
 
-    records = gather_by_xref(circular_id, fetch, max_hops=1)
-    actions = aggregate_event(
-        records,
-        extractor,
-        instrument_map=spcfg.get("instrument_map") or {},
-        bandpass_instrument_map=spcfg.get("bandpass_instrument_map") or {},
-        default_instrument_id=spcfg.get("default_instrument_id"),
-        group_ids=group_ids,
+    records, actions = (
+        prepared
+        if prepared is not None
+        else prepare_circular(record, extractor=extractor, fetch=fetch, cfg=cfg)
     )
     result = ProcessResult(circular_id=circular_id)
     if actions.source is None:
