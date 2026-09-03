@@ -239,6 +239,7 @@ class ProcessResult:
     dateobs: str | None = None
     matched_by: str = ""
     photometry: int = 0
+    rejected: int = 0
     status: str = "nothing-postable"  # posted | unresolved-event | nothing-postable
     names: list[str] = field(default_factory=list)
 
@@ -318,6 +319,17 @@ async def process_circular(
         result.status = "unresolved-event"
         return result
     result.dateobs, result.matched_by = str(match.dateobs), match.matched_by
+
+    # A retraction cannot un-post what an earlier circular already wrote, so the
+    # rows are marked unreliable instead — the reader sees the measurement and
+    # the reason it is no longer trusted.
+    withdrawn = [e.circular_id for e in actions.extractions if e.retraction]
+    if withdrawn and actions.source is not None:
+        result.rejected = await writer.reject_photometry(
+            session,
+            actions.source.id,
+            "Counterpart retracted by " + ", ".join(f"GCN {c}" for c in withdrawn) + ".",
+        )
 
     if writes.get("source", True):
         await writer.write_source(session, actions.source, group_ids)

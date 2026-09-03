@@ -95,13 +95,14 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
         log.info("circular %s parked: no GcnEvent for %s", result.circular_id, result.names)
     else:
         log.info(
-            "circular %s %s obj=%s dateobs=%s via=%s %d photometry",
+            "circular %s %s obj=%s dateobs=%s via=%s %d photometry, %d rejected",
             result.circular_id,
             result.status,
             result.obj_id,
             result.dateobs,
             result.matched_by,
             result.photometry,
+            result.rejected,
         )
     return result
 

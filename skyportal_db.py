@@ -159,6 +159,54 @@ class SkyPortalWriter:
         obj.redshift = z
         obj.redshift_error = z_err
 
+    async def reject_photometry(self, session: Any, obj_id: str, explanation: str) -> int:
+        """Mark this producer's photometry on a source unreliable.
+
+        A retracted counterpart's measurements are kept: deleting them would
+        erase the record of what was reported, and a reader who saw the earlier
+        value needs to find it marked rather than missing.
+        """
+        self._record("reject_photometry", {"obj_id": obj_id, "explanation": explanation})
+        if not self.live:
+            return 0
+        import sqlalchemy as sa
+        from skyportal.models import Photometry, PhotometryValidation
+
+        rows = (
+            (
+                await session.scalars(
+                    sa.select(Photometry).where(
+                        Photometry.obj_id == obj_id, Photometry.origin == ORIGIN
+                    )
+                )
+            )
+            .unique()
+            .all()
+        )
+        marked = 0
+        for row in rows:
+            existing = await session.scalar(
+                sa.select(PhotometryValidation).where(PhotometryValidation.photometry_id == row.id)
+            )
+            if existing is not None:
+                if existing.validated is not False:
+                    existing.validated = False
+                    existing.explanation = explanation
+                    marked += 1
+                continue
+            session.add(
+                PhotometryValidation(
+                    photometry_id=row.id,
+                    validated=False,
+                    validator_id=self.user_id,
+                    explanation=explanation,
+                )
+            )
+            marked += 1
+        if marked:
+            log.info("marked %d photometry point(s) on %s unreliable", marked, obj_id)
+        return marked
+
 
 def render_plan(plan: list[dict[str, Any]]) -> str:
     """Human-readable dump of planned writes, for dry-run output."""

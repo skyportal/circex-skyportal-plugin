@@ -69,3 +69,29 @@ def test_prepare_runs_without_a_session(monkeypatch):
     )
     assert got_records == records
     assert actions == "actions"
+
+
+def test_a_retraction_marks_earlier_photometry_unreliable():
+    """GCN 45503 retracted the counterpart GCN 45501 reported.
+
+    The rows are kept and flagged: a reader who saw the earlier magnitude needs
+    to find it marked rather than missing.
+    """
+    import skyportal_db
+
+    writer = skyportal_db.SkyPortalWriter(live=False)
+    calls = []
+    writer._record = lambda op, payload: calls.append((op, payload))
+
+    import asyncio
+
+    n = asyncio.run(
+        writer.reject_photometry(None, "GRB260903A", "Counterpart retracted by GCN 45503.")
+    )
+    assert n == 0  # dry run writes nothing
+    assert calls == [
+        (
+            "reject_photometry",
+            {"obj_id": "GRB260903A", "explanation": "Counterpart retracted by GCN 45503."},
+        )
+    ]
