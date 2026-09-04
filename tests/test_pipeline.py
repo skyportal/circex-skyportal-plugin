@@ -164,3 +164,17 @@ def test_prepare_accepts_a_trigger_override(monkeypatch):
         {"circularId": 1}, extractor=None, fetch=None, cfg={}, trigger_time=burst
     )
     assert seen["trigger_time"] == burst
+
+
+def test_configured_routing_beats_the_derived_map():
+    """Deriving from the instance must not override a deliberate choice."""
+    import main
+
+    merged = main.merge_routing({"epfxt": 1184, "epwxt": 1183}, {"epfxt": 999})
+    assert merged == {"epfxt": 999, "epwxt": 1183}
+
+
+def test_routing_with_nothing_configured():
+    import main
+
+    assert main.merge_routing({"epfxt": 1184}, None) == {"epfxt": 1184}

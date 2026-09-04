@@ -227,6 +227,56 @@ async def run_consumer(ctx: dict[str, Any]) -> None:
             consumer.commit(message)
 
 
+def merge_routing(derived: dict[str, int], configured: dict[str, int] | None) -> dict[str, int]:
+    """Derived routing, with any configured entry taking precedence."""
+    return {**derived, **(configured or {})}
+
+
+async def learn_instruments(cfg: dict[str, Any]) -> None:
+    """Fill the routing maps from the instance's own instruments, in place.
+
+    A mission bandpass names its instrument exactly — only EP/FXT declares
+    epfxt — so the mapping is a fact about the database rather than a decision,
+    and reading it beats maintaining it by hand. Configured entries win, so an
+    instance can still override. Bands several instruments share are left out;
+    those rows fall back to the configured default.
+    """
+    from baselayer.app import models
+    from circex.bot.instrument_map import (
+        derive_bandpass_instrument_map,
+        derive_instrument_map,
+    )
+
+    spcfg = cfg.setdefault("skyportal", {})
+    try:
+        async with models.async_plain_session_factory() as session:
+            import sqlalchemy as sa
+            from skyportal.models import Instrument
+
+            rows = (await session.scalars(sa.select(Instrument))).unique().all()
+            records = [
+                {
+                    "id": r.id,
+                    "filters": list(r.filters or []),
+                    "telescope": {
+                        "name": getattr(r.telescope, "name", None),
+                        "nickname": getattr(r.telescope, "nickname", None),
+                    },
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        log.warning("could not read instruments; routing falls back to the default: %s", exc)
+        return
+
+    for key, derived in (
+        ("bandpass_instrument_map", derive_bandpass_instrument_map(records)),
+        ("instrument_map", derive_instrument_map(records)),
+    ):
+        spcfg[key] = merge_routing(derived, spcfg.get(key))
+        log.info("%s: %d entries (%d derived)", key, len(spcfg[key]), len(derived))
+
+
 def build_context(cfg: dict[str, Any]) -> dict[str, Any]:
     spcfg = cfg.get("skyportal") or {}
     return {
@@ -247,6 +297,7 @@ async def amain(cfg: dict[str, Any]) -> None:
     _, app_cfg = load_env()
     init_db(**app_cfg["database"])
 
+    await learn_instruments(cfg)
     ctx = build_context(cfg)
     if not ctx["writer"].live:
         log.warning("DRY RUN: writes are planned and logged, nothing is committed")
