@@ -252,8 +252,19 @@ async def learn_instruments(cfg: dict[str, Any]) -> None:
         async with models.async_plain_session_factory() as session:
             import sqlalchemy as sa
             from skyportal.models import Instrument
+            from sqlalchemy.orm import selectinload
 
-            rows = (await session.scalars(sa.select(Instrument))).unique().all()
+            # The telescope must be loaded with the instrument: touching the
+            # relationship afterwards is IO, which an async session refuses.
+            rows = (
+                (
+                    await session.scalars(
+                        sa.select(Instrument).options(selectinload(Instrument.telescope))
+                    )
+                )
+                .unique()
+                .all()
+            )
             records = [
                 {
                     "id": r.id,
