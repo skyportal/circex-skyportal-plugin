@@ -111,3 +111,28 @@ def test_prepare_runs_on_the_calling_thread():
     source = inspect.getsource(main.handle_record)
     assert "prepare_circular" in source
     assert "to_thread" not in source
+
+
+def test_prepare_passes_a_trigger_time(monkeypatch):
+    """Relative epochs ("2.30 hr after the trigger") need one.
+
+    Without it aggregate_event defaults to None and every such row is dropped
+    for having no observation time.
+    """
+    import pipeline
+
+    seen = {}
+
+    def _aggregate(records, extractor, **kwargs):
+        seen.update(kwargs)
+        return "actions"
+
+    monkeypatch.setattr(
+        "circex.bot.aggregate.gather_by_xref",
+        lambda *a, **k: [
+            {"circularId": 1, "createdOn": 1_756_000_000_000, "body": "b", "subject": "s"}
+        ],
+    )
+    monkeypatch.setattr("circex.bot.aggregate.aggregate_event", _aggregate)
+    pipeline.prepare_circular({"circularId": 1}, extractor=None, fetch=None, cfg={})
+    assert seen.get("trigger_time") is not None

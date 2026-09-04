@@ -264,6 +264,9 @@ def prepare_circular(
     actions = aggregate_event(
         records,
         extractor,
+        # Without this every "N hours after the trigger" epoch stays unresolved
+        # and the row is dropped for having no observation time.
+        trigger_time=_trigger_time(records),
         instrument_map=spcfg.get("instrument_map") or {},
         bandpass_instrument_map=spcfg.get("bandpass_instrument_map") or {},
         default_instrument_id=spcfg.get("default_instrument_id"),
