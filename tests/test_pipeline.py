@@ -95,3 +95,19 @@ def test_a_retraction_marks_earlier_photometry_unreliable():
             {"obj_id": "GRB260903A", "explanation": "Counterpart retracted by GCN 45503."},
         )
     ]
+
+
+def test_prepare_runs_on_the_calling_thread():
+    """The LLM cache holds a SQLite connection bound to one thread.
+
+    Running prepare_circular on a worker thread raised
+    "SQLite objects created in a thread can only be used in that same thread"
+    on every circular, so the consumer must call it directly.
+    """
+    import inspect
+
+    import main
+
+    source = inspect.getsource(main.handle_record)
+    assert "prepare_circular" in source
+    assert "to_thread" not in source

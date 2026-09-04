@@ -68,9 +68,10 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
     from baselayer.app import models
 
     # Fetch and extract before opening the session: an extraction can take
-    # minutes, and Postgres closes a transaction left idle that long.
-    prepared = await asyncio.to_thread(
-        pipeline.prepare_circular,
+    # minutes, and Postgres closes a transaction left idle that long. This runs
+    # on the event loop's thread deliberately — the LLM cache holds a SQLite
+    # connection that cannot be used from another one.
+    prepared = pipeline.prepare_circular(
         record,
         extractor=ctx["extractor"],
         fetch=ctx["fetch"],
