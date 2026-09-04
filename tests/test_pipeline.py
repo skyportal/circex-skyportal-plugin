@@ -136,3 +136,31 @@ def test_prepare_passes_a_trigger_time(monkeypatch):
     monkeypatch.setattr("circex.bot.aggregate.aggregate_event", _aggregate)
     pipeline.prepare_circular({"circularId": 1}, extractor=None, fetch=None, cfg={})
     assert seen.get("trigger_time") is not None
+
+
+def test_prepare_accepts_a_trigger_override(monkeypatch):
+    """The event's dateobs is the burst time; the first circular's timestamp
+    trails it by however long the observers took to write.
+
+    GCN 45505's three epochs landed 42 minutes late on that proxy alone.
+    """
+    import datetime
+
+    import pipeline
+
+    seen = {}
+    monkeypatch.setattr(
+        "circex.bot.aggregate.gather_by_xref",
+        lambda *a, **k: [
+            {"circularId": 1, "createdOn": 1_756_000_000_000, "body": "b", "subject": "s"}
+        ],
+    )
+    monkeypatch.setattr(
+        "circex.bot.aggregate.aggregate_event",
+        lambda records, extractor, **kw: seen.update(kw) or "actions",
+    )
+    burst = datetime.datetime(2026, 9, 3, 12, 36, 47, tzinfo=datetime.UTC)
+    pipeline.prepare_circular(
+        {"circularId": 1}, extractor=None, fetch=None, cfg={}, trigger_time=burst
+    )
+    assert seen["trigger_time"] == burst

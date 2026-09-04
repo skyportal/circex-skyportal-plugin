@@ -250,6 +250,7 @@ def prepare_circular(
     extractor: Any,
     fetch: Any,
     cfg: dict[str, Any],
+    trigger_time: Any = None,
 ) -> tuple[list[dict[str, Any]], Any]:
     """Fetch the cross-referenced circulars and extract them.
 
@@ -265,8 +266,11 @@ def prepare_circular(
         records,
         extractor,
         # Without this every "N hours after the trigger" epoch stays unresolved
-        # and the row is dropped for having no observation time.
-        trigger_time=_trigger_time(records),
+        # and the row is dropped for having no observation time. The caller
+        # passes the event's dateobs once it is known; the fallback is the first
+        # circular's timestamp, which trails the burst by the time it took to
+        # write about it.
+        trigger_time=trigger_time or _trigger_time(records),
         instrument_map=spcfg.get("instrument_map") or {},
         bandpass_instrument_map=spcfg.get("bandpass_instrument_map") or {},
         default_instrument_id=spcfg.get("default_instrument_id"),
@@ -322,6 +326,18 @@ async def process_circular(
         result.status = "unresolved-event"
         return result
     result.dateobs, result.matched_by = str(match.dateobs), match.matched_by
+
+    # The epochs above were resolved against the first circular's timestamp,
+    # which trails the burst. Now that the event is known, redo them against its
+    # dateobs; the extraction cache makes the second pass cheap.
+    if match.dateobs is not None and match.dateobs != _trigger_time(records):
+        records, actions = prepare_circular(
+            record,
+            extractor=extractor,
+            fetch=fetch,
+            cfg=cfg,
+            trigger_time=match.dateobs,
+        )
 
     # A retraction cannot un-post what an earlier circular already wrote, so the
     # rows are marked unreliable instead — the reader sees the measurement and
