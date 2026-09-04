@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -188,10 +188,29 @@ async def run_consumer(ctx: dict[str, Any]) -> None:
 
     consumer = await loop.run_in_executor(None, _kafka_consumer, ccfg, client_id, client_secret)
     log.info("subscribed as group %s", ccfg["group_id"])
+    # A consumer that is subscribed but unassigned looks exactly like a quiet
+    # night, so say so periodically rather than going silent for hours.
+    idle_since = datetime.now(UTC)
     while True:
         messages = await loop.run_in_executor(None, consumer.consume, 10, 1.0)
+        if not messages:
+            idle = datetime.now(UTC) - idle_since
+            if idle > timedelta(minutes=30):
+                log.info(
+                    "no circulars for %d min; partitions assigned: %s",
+                    idle.total_seconds() // 60,
+                    consumer.assignment() or "NONE",
+                )
+                idle_since = datetime.now(UTC)
+            continue
+        idle_since = datetime.now(UTC)
         for message in messages:
-            if message.error() or message.value() is None:
+            if message.error():
+                # Swallowing this made a stuck consumer group indistinguishable
+                # from an empty topic.
+                log.warning("kafka error: %s", message.error())
+                continue
+            if message.value() is None:
                 continue
             try:
                 record = json.loads(message.value())
