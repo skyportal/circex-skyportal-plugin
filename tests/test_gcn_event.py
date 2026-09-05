@@ -80,3 +80,19 @@ def test_trigger_time_separates_events_on_a_busy_day():
     svom = _Event(datetime(2026, 6, 4, 20, 20))
     picked = gcn_event._pick([fermi, svom], datetime(2026, 6, 4, 20, 25, tzinfo=UTC))
     assert picked is svom
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # EP circulars quote the numeric core of "ep01709302592wxt43s2"
+        ({"01709302592", "EP-WXT"}, ["01709302592"]),
+        # too short to be distinctive in prose
+        ({"516027", "2026"}, []),
+        # longest first, so the most specific is tried before a looser one
+        ({"123456789", "0123456789012"}, ["0123456789012", "123456789"]),
+        ({"ep01709302592wxt43s2"}, []),  # not all digits; the exact match covers it
+    ],
+)
+def test_only_a_long_number_is_tried_as_an_embedded_id(tokens, expected):
+    assert gcn_event._embedded_id_numbers(tokens) == expected

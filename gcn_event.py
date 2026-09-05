@@ -96,6 +96,19 @@ async def _events_in_window(session, centre, hours):
     )
 
 
+# Short numbers appear all over circular prose; an id core is long.
+_MIN_EMBEDDED_DIGITS = 9
+
+
+def _embedded_id_numbers(candidates):
+    """Numbers long enough to be the core of a trigger id, longest first."""
+    return sorted(
+        (t for t in candidates if t.isdigit() and len(t) >= _MIN_EMBEDDED_DIGITS),
+        key=len,
+        reverse=True,
+    )
+
+
 async def _event_by_trigger_id(session, text):
     """The event whose trigger_id appears verbatim in the circular.
 
@@ -110,11 +123,32 @@ async def _event_by_trigger_id(session, text):
     candidates = {t for t in re.findall(r"\b[A-Za-z0-9_-]{6,}\b", text)}
     if not candidates:
         return None
-    return await session.scalar(
+    exact = await session.scalar(
         sa.select(GcnEvent)
         .where(GcnEvent.trigger_id.in_(candidates))
         .options(selectinload(GcnEvent.localizations))
     )
+    if exact is not None:
+        return exact
+
+    # An EP circular quotes the numeric core of the id the notice carries
+    # ("01709302592" for "ep01709302592wxt43s2"). Only a long number is tried,
+    # and only when it picks out exactly one event.
+    for number in _embedded_id_numbers(candidates):
+        rows = (
+            (
+                await session.scalars(
+                    sa.select(GcnEvent)
+                    .where(GcnEvent.trigger_id.contains(number))
+                    .options(selectinload(GcnEvent.localizations))
+                )
+            )
+            .unique()
+            .all()
+        )
+        if len(rows) == 1:
+            return rows[0]
+    return None
 
 
 async def _events_by_alias(session, needle):
