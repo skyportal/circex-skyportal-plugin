@@ -1,5 +1,7 @@
 """Pure helpers. The write path is exercised in fritz's in-container tests."""
 
+from datetime import UTC, datetime
+
 import pytest
 
 import pipeline
@@ -178,3 +180,45 @@ def test_routing_with_nothing_configured():
     import main
 
     assert main.merge_routing({"epfxt": 1184}, None) == {"epfxt": 1184}
+
+
+def test_reaggregation_is_only_needed_when_the_reference_time_moved():
+    """The second pass exists to retime relative epochs; a matching dateobs
+    means there is nothing to redo, and it is the expensive half."""
+    import types
+
+    import pipeline
+
+    published = datetime(2026, 9, 7, 0, 28, 2, tzinfo=UTC)
+    records = [{"circularId": 1, "createdOn": int(published.timestamp() * 1000)}]
+    trigger = pipeline._trigger_time(records)
+
+    assert pipeline.needs_reaggregation(records, types.SimpleNamespace(dateobs=trigger)) is False
+    assert pipeline.needs_reaggregation(records, types.SimpleNamespace(dateobs=None)) is False
+    moved = types.SimpleNamespace(dateobs=datetime(2026, 9, 3, 12, 36, 47, tzinfo=UTC))
+    assert pipeline.needs_reaggregation(records, moved) is True
+
+
+def test_reaggregation_runs_without_a_session(monkeypatch):
+    """It fetches and extracts again, so it must stay outside the transaction."""
+    import types
+
+    import pipeline
+
+    seen = {}
+
+    def fake_prepare(record, *, extractor, fetch, cfg, trigger_time=None):
+        seen["trigger_time"] = trigger_time
+        return ([{"circularId": 1}], "actions")
+
+    monkeypatch.setattr(pipeline, "prepare_circular", fake_prepare)
+    dateobs = datetime(2026, 9, 3, 12, 36, 47, tzinfo=UTC)
+    records, actions = pipeline.reaggregated(
+        {"circularId": 1},
+        types.SimpleNamespace(dateobs=dateobs),
+        extractor=None,
+        fetch=None,
+        cfg={},
+    )
+    assert seen["trigger_time"] == dateobs
+    assert actions == "actions"

@@ -279,6 +279,40 @@ def prepare_circular(
     return records, actions
 
 
+async def resolve_circular(
+    session: Any, *, records: list[dict[str, Any]], actions: Any, cfg: dict[str, Any]
+) -> Any:
+    """The GcnEvent this circular belongs to, or None. Reads only."""
+    rcfg = cfg.get("resolver") or {}
+    return await gcn_event.resolve_event(
+        session,
+        names=event_names(actions),
+        trigger_time=_trigger_time(records),
+        order=rcfg.get("order"),
+        window_hours=float(rcfg.get("window_hours") or 12),
+        text=" ".join(str(r.get("body") or "") for r in records),
+    )
+
+
+def needs_reaggregation(records: list[dict[str, Any]], match: Any) -> bool:
+    """Whether the epochs were resolved against the wrong reference time."""
+    return match.dateobs is not None and match.dateobs != _trigger_time(records)
+
+
+def reaggregated(
+    record: dict[str, Any], match: Any, *, extractor: Any, fetch: Any, cfg: dict[str, Any]
+) -> tuple[list[dict[str, Any]], Any]:
+    """Redo the aggregation against the event's dateobs.
+
+    The first pass timed relative epochs against the earliest circular, which
+    trails the burst. Runs outside the transaction: it fetches and extracts, and
+    a transaction left idle that long is closed by the database.
+    """
+    return prepare_circular(
+        record, extractor=extractor, fetch=fetch, cfg=cfg, trigger_time=match.dateobs
+    )
+
+
 async def process_circular(
     record: dict[str, Any],
     *,
@@ -288,11 +322,13 @@ async def process_circular(
     fetch: Any,
     cfg: dict[str, Any],
     prepared: tuple[list[dict[str, Any]], Any] | None = None,
+    match: Any | None = None,
 ) -> ProcessResult:
     """Bind one circular's extraction to its SkyPortal GcnEvent and write it.
 
-    Pass `prepared` to reuse work done outside the transaction; without it the
-    fetch and extraction run here, holding the session open for their duration.
+    Pass `prepared` and `match` to reuse work done outside the transaction;
+    without them the fetch, extraction and event resolution run here, holding
+    the session open for their duration.
     """
     circular_id = int(record.get("circularId") or 0)
     spcfg = cfg.get("skyportal") or {}
@@ -312,14 +348,8 @@ async def process_circular(
 
     names = event_names(actions)
     result.names = names
-    match = await gcn_event.resolve_event(
-        session,
-        names=names,
-        trigger_time=_trigger_time(records),
-        order=rcfg.get("order"),
-        window_hours=float(rcfg.get("window_hours") or 12),
-        text=" ".join(str(r.get("body") or "") for r in records),
-    )
+    if match is None:
+        match = await resolve_circular(session, records=records, actions=actions, cfg=cfg)
     if match is None:
         # The event usually appears within minutes; the caller parks the
         # circular and retries rather than dropping the extraction.
@@ -327,17 +357,8 @@ async def process_circular(
         return result
     result.dateobs, result.matched_by = str(match.dateobs), match.matched_by
 
-    # The epochs above were resolved against the first circular's timestamp,
-    # which trails the burst. Now that the event is known, redo them against its
-    # dateobs; the extraction cache makes the second pass cheap.
-    if match.dateobs is not None and match.dateobs != _trigger_time(records):
-        records, actions = prepare_circular(
-            record,
-            extractor=extractor,
-            fetch=fetch,
-            cfg=cfg,
-            trigger_time=match.dateobs,
-        )
+    if needs_reaggregation(records, match):
+        records, actions = reaggregated(record, match, extractor=extractor, fetch=fetch, cfg=cfg)
 
     # A retraction cannot un-post what an earlier circular already wrote, so the
     # rows are marked unreliable instead — the reader sees the measurement and

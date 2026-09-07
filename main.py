@@ -78,6 +78,25 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
         cfg=ctx["cfg"],
     )
 
+    # Resolve the event in its own short transaction. The re-aggregation that
+    # follows fetches and extracts again, which is far longer than the database
+    # leaves a transaction idle.
+    records, actions = prepared
+    match = None
+    if actions.source is not None:
+        async with models.async_plain_session_factory() as session:
+            match = await pipeline.resolve_circular(
+                session, records=records, actions=actions, cfg=ctx["cfg"]
+            )
+        if match is not None and pipeline.needs_reaggregation(records, match):
+            prepared = pipeline.reaggregated(
+                record,
+                match,
+                extractor=ctx["extractor"],
+                fetch=ctx["fetch"],
+                cfg=ctx["cfg"],
+            )
+
     async with models.async_plain_session_factory() as session:
         result = await pipeline.process_circular(
             record,
@@ -87,6 +106,7 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
             fetch=ctx["fetch"],
             cfg=ctx["cfg"],
             prepared=prepared,
+            match=match,
         )
         if ctx["writer"].live:
             await session.commit()
