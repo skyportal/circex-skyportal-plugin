@@ -186,6 +186,65 @@ def _kafka_consumer(ccfg: dict[str, Any], client_id: str, client_secret: str) ->
     return consumer
 
 
+def _seek_back(consumer: Any, message: Any) -> None:
+    """Rewind to this message so the next poll delivers it again."""
+    from confluent_kafka import TopicPartition
+
+    consumer.seek(TopicPartition(message.topic(), message.partition(), message.offset()))
+
+
+async def consume_batch(
+    consumer: Any,
+    messages: list[Any],
+    ctx: dict[str, Any],
+    failures: dict[tuple[int, int], int],
+    max_attempts: int,
+) -> None:
+    """Handle one poll's messages, committing only what is safely behind us.
+
+    A commit is a position, not an acknowledgement of one message: it carries
+    every earlier offset with it. Committing after a failure would bury the
+    failed circular rather than retry it, so a failure ends the batch and its
+    offset is left for the next poll. A circular that keeps failing is given up
+    on loudly rather than blocking the partition behind it.
+    """
+    for message in messages:
+        if message.error():
+            # Swallowing this made a stuck consumer group indistinguishable
+            # from an empty topic.
+            log.warning("kafka error: %s", message.error())
+            continue
+        if message.value() is None:
+            continue
+        try:
+            record = json.loads(message.value())
+        except json.JSONDecodeError as exc:
+            log.warning("undecodable circular: %s", exc)
+            consumer.commit(message)
+            continue
+        key = (message.partition(), message.offset())
+        try:
+            await handle_record(record, ctx)
+        except Exception:
+            attempts = failures[key] = failures.get(key, 0) + 1
+            log.exception(
+                "failed to handle circular %s (attempt %d of %d)",
+                record.get("circularId"),
+                attempts,
+                max_attempts,
+            )
+            if attempts < max_attempts:
+                _seek_back(consumer, message)
+                return
+            log.error(
+                "giving up on circular %s after %d attempts; it will not be seen again",
+                record.get("circularId"),
+                attempts,
+            )
+        failures.pop(key, None)
+        consumer.commit(message)
+
+
 async def run_consumer(ctx: dict[str, Any]) -> None:
     ccfg = ctx["cfg"].get("consumer") or {}
     loop = asyncio.get_running_loop()
@@ -211,6 +270,8 @@ async def run_consumer(ctx: dict[str, Any]) -> None:
     # A consumer that is subscribed but unassigned looks exactly like a quiet
     # night, so say so periodically rather than going silent for hours.
     idle_since = datetime.now(UTC)
+    failures: dict[tuple[int, int], int] = {}
+    max_attempts = int(ccfg.get("max_attempts") or 3)
     while True:
         messages = await loop.run_in_executor(None, consumer.consume, 10, 1.0)
         if not messages:
@@ -224,27 +285,7 @@ async def run_consumer(ctx: dict[str, Any]) -> None:
                 idle_since = datetime.now(UTC)
             continue
         idle_since = datetime.now(UTC)
-        for message in messages:
-            if message.error():
-                # Swallowing this made a stuck consumer group indistinguishable
-                # from an empty topic.
-                log.warning("kafka error: %s", message.error())
-                continue
-            if message.value() is None:
-                continue
-            try:
-                record = json.loads(message.value())
-            except json.JSONDecodeError as exc:
-                log.warning("undecodable circular: %s", exc)
-                consumer.commit(message)
-                continue
-            try:
-                await handle_record(record, ctx)
-            except Exception:
-                # Leave the offset uncommitted so the circular is retried.
-                log.exception("failed to handle circular %s", record.get("circularId"))
-                continue
-            consumer.commit(message)
+        await consume_batch(consumer, messages, ctx, failures, max_attempts)
 
 
 def merge_routing(derived: dict[str, int], configured: dict[str, int] | None) -> dict[str, int]:
