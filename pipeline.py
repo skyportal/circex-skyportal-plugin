@@ -342,9 +342,13 @@ async def process_circular(
         else prepare_circular(record, extractor=extractor, fetch=fetch, cfg=cfg)
     )
     result = ProcessResult(circular_id=circular_id)
-    if actions.source is None:
+    # A circular that tabulates candidates has no event-level source of its own:
+    # the objects it announces are the sources, so it must not stop here.
+    if actions.source is None and not actions.candidate_sources:
         return result
-    result.obj_id = actions.source.id
+    result.obj_id = (
+        actions.source.id if actions.source is not None else actions.candidate_sources[0].id
+    )
 
     names = event_names(actions)
     result.names = names
@@ -372,9 +376,14 @@ async def process_circular(
         )
 
     if writes.get("source", True):
-        await writer.write_source(session, actions.source, group_ids)
+        # A circular tabulating counterpart candidates names each one, so each is
+        # written as its own source before the photometry that keys to it.
+        for candidate in actions.candidate_sources:
+            await writer.write_source(session, candidate, group_ids)
+        if actions.source is not None:
+            await writer.write_source(session, actions.source, group_ids)
         result.photometry = await writer.write_photometry(session, actions.photometry, group_ids)
-        if actions.redshift is not None:
+        if actions.redshift is not None and actions.source is not None:
             z, z_err = actions.redshift
             await writer.set_redshift(session, actions.source.id, z, z_err)
 
