@@ -193,6 +193,24 @@ def _seek_back(consumer: Any, message: Any) -> None:
     consumer.seek(TopicPartition(message.topic(), message.partition(), message.offset()))
 
 
+def _reset_scoped_session() -> None:
+    """Discard the scoped session after a failure.
+
+    SkyPortal loads models through marshmallow, which uses the scoped session
+    rather than the async one opened per write. A failed write leaves that
+    session in an aborted transaction, and it outlives the attempt: without
+    this every retry raises PendingRollbackError before reaching the work, so
+    the attempts burn in a second and the circular is dropped for a fault that
+    may well have been transient.
+    """
+    try:
+        from baselayer.app import models
+
+        models.DBSession.remove()
+    except Exception:
+        log.warning("could not reset the scoped session", exc_info=True)
+
+
 async def consume_batch(
     consumer: Any,
     messages: list[Any],
@@ -233,6 +251,7 @@ async def consume_batch(
                 attempts,
                 max_attempts,
             )
+            _reset_scoped_session()
             if attempts < max_attempts:
                 _seek_back(consumer, message)
                 return

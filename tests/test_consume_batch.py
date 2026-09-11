@@ -113,3 +113,16 @@ async def test_giving_up_does_not_charge_the_next_circular(handled):
 
     assert consumer.committed == [10, 11]
     assert failures == {}
+
+
+async def test_a_failure_clears_the_scoped_session_before_retrying(handled, monkeypatch):
+    """A poisoned session would otherwise make every retry fail instantly."""
+    seen, failing = handled
+    failing.add(45525)
+    resets = []
+    monkeypatch.setattr(main, "_reset_scoped_session", lambda: resets.append(1))
+
+    consumer = FakeConsumer()
+    await main.consume_batch(consumer, [FakeMessage(45525, 10)], {}, {}, 3)
+
+    assert resets, "the session is reset before the offset is sought back"
