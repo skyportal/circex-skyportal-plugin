@@ -390,7 +390,9 @@ async def ensure_localization(session, writer, match, ra, dec, ra_dec_error=None
     if existing is not None:
         return name
 
-    localization = Localization(**skymap)
+    # sent_by_id is NOT NULL on the model, and from_cone/from_ellipse build the
+    # skymap without one: the same user the tiles are attributed to owns it.
+    localization = Localization(**skymap, sent_by_id=writer.user_id)
     session.add(localization)
     await session.commit()
     log.info("created localization %s for %s", name, match.dateobs)

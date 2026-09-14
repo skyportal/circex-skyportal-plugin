@@ -267,3 +267,69 @@ def test_a_missing_association_model_does_not_lose_the_comment():
 
     assert calls, "the association should have been attempted"
     assert added == ["the record"], "the comment must survive an association failure"
+
+
+def test_a_created_localization_is_attributed_to_a_user():
+    """sent_by_id is NOT NULL and the skymap builders do not supply one, so the
+    call site must. skyportal is imported inside the function, so the modules it
+    reaches for are stubbed rather than patched."""
+    import sys
+    import types
+
+    captured = {}
+
+    class FakeLocalization:
+        # the lookup builds a filter from these before any row is created
+        id = 7
+        dateobs = None
+        localization_name = None
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class FakeSession:
+        def add(self, _obj):
+            pass
+
+        async def scalar(self, _stmt):
+            return None
+
+        async def commit(self):
+            pass
+
+    models = types.ModuleType("skyportal.models")
+    models.Localization = FakeLocalization
+    handlers = types.ModuleType("skyportal.handlers.api.gcn")
+    handlers.add_tiles_and_properties_and_contour = lambda *a, **k: None
+    utils = types.ModuleType("skyportal.utils.gcn")
+    utils.from_cone = lambda ra, dec, error: {
+        "localization_name": f"{ra:.5f}_{dec:.5f}_{error:.5f}",
+        "uniq": [],
+        "probdensity": [],
+    }
+    utils.from_ellipse = lambda *a, **k: {}
+
+    sa = types.ModuleType("sqlalchemy")
+    sa.select = lambda *a, **k: types.SimpleNamespace(where=lambda *w, **kw: None)
+
+    stubs = {
+        "skyportal.models": models,
+        "skyportal.handlers.api.gcn": handlers,
+        "skyportal.utils.gcn": utils,
+        "sqlalchemy": sa,
+    }
+    saved = {k: sys.modules.get(k) for k in stubs}
+    sys.modules.update(stubs)
+    try:
+        match = gcn_event.EventMatch(dateobs="2026-06-04T00:00:00", localizations=[])
+        writer = FakeWriter(live=True, user_id=42)
+        asyncio.run(gcn_event.ensure_localization(FakeSession(), writer, match, 10.0, -20.0, 0.3))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    assert captured.get("sent_by_id") == 42, "a localization with no owner cannot be saved"
+    assert "localization_name" in captured
