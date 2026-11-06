@@ -384,10 +384,14 @@ def build_context(cfg: dict[str, Any]) -> dict[str, Any]:
 async def amain(cfg: dict[str, Any]) -> None:
     from baselayer.app.env import load_env
     from baselayer.app.models import init_db
+    from skyportal.utils.services import is_loaded
 
     _, app_cfg = load_env()
     init_db(**app_cfg["database"])
 
+    while not await asyncio.to_thread(is_loaded):
+        log.info("waiting for the app to start")
+        await asyncio.sleep(10)
     await learn_instruments(cfg)
     ctx = build_context(cfg)
     if not ctx["writer"].live:
