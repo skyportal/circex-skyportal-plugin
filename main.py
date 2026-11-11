@@ -112,8 +112,18 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
             await session.commit()
 
     if result.status == "unresolved-event":
-        PENDING.append((datetime.now(UTC), record))
-        log.info("circular %s parked: no GcnEvent for %s", result.circular_id, result.names)
+        published = pipeline._circular_datetime(record)
+        now = datetime.now(UTC).replace(tzinfo=None)
+        if published is not None and now - published > retry_max_age(ctx):
+            log.info(
+                "circular %s dropped: no GcnEvent for %s, published %s",
+                result.circular_id,
+                result.names,
+                published,
+            )
+        else:
+            PENDING.append((datetime.now(UTC), record))
+            log.info("circular %s parked: no GcnEvent for %s", result.circular_id, result.names)
     else:
         log.info(
             "circular %s %s obj=%s dateobs=%s via=%s %d photometry, %d rejected",
@@ -128,11 +138,16 @@ async def handle_record(record: dict[str, Any], ctx: dict[str, Any]) -> pipeline
     return result
 
 
+def retry_max_age(ctx: dict[str, Any]) -> timedelta:
+    rcfg = ctx["cfg"].get("resolver") or {}
+    return timedelta(hours=float(rcfg.get("retry_max_age_hours") or 72))
+
+
 async def retry_pending(ctx: dict[str, Any]) -> None:
     """Re-try parked circulars; the notice that creates the event often lands later."""
     rcfg = ctx["cfg"].get("resolver") or {}
     interval = float(rcfg.get("retry_interval_seconds") or 900)
-    max_age = float(rcfg.get("retry_max_age_hours") or 72) * 3600
+    max_age = retry_max_age(ctx).total_seconds()
     while True:
         await asyncio.sleep(interval)
         if not PENDING:
@@ -146,7 +161,7 @@ async def retry_pending(ctx: dict[str, Any]) -> None:
             result = await handle_record(record, ctx)
             # Keep the original timestamp so max_age measures age since first
             # sighting, not since the last retry.
-            if result.status == "unresolved-event" and PENDING:
+            if result.status == "unresolved-event" and PENDING and PENDING[-1][1] is record:
                 PENDING[-1] = (parked_at, record)
 
 

@@ -56,7 +56,8 @@ resolves by designation, and every later one by alias.
 
 A circular whose event resolves to nothing is **parked, not dropped** —
 circulars routinely beat the notice that creates the event. The retry queue
-re-tries them until `retry_max_age_hours`.
+re-tries them until `retry_max_age_hours`. A circular published longer ago
+than that, such as an old one edited and sent again, is not parked.
 
 ## Setup
 
